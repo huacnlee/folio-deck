@@ -9,7 +9,7 @@ A native desktop mail demo built with [gpui-shell](https://gpui-kit.com/shell/) 
 Install the runtime and mail app with one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huacnlee/gpui-shell-mail-example/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-mail/main/install.sh | sh
 ```
 
 The installer supports Linux x86_64 and macOS Intel / Apple Silicon. It installs gpui-shell v0.7.3 when no compatible runtime exists in `~/.local/bin`, verifies the release's SHA-256 checksum, downloads the app, and checks it before replacing an existing installation. No sudo, Git, Node, or Rust toolchain is required. Linux requires `xdg-utils` for launch links; curl, tar, and a SHA-256 utility are required on both platforms.
@@ -25,7 +25,7 @@ sh install.sh --app-source .
 Append `--launch` to open it after installation. For example:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huacnlee/gpui-shell-mail-example/main/install.sh | sh -s -- --launch
+curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-mail/main/install.sh | sh -s -- --launch
 ```
 
 ## Launch
@@ -41,8 +41,8 @@ The installer registers the `folio-mail://open` URL scheme with a Linux desktop 
 ## Develop
 
 ```bash
-git clone https://github.com/huacnlee/gpui-shell-mail-example.git
-cd gpui-shell-mail-example
+git clone https://github.com/huacnlee/folio-mail.git
+cd folio-mail
 gpui-shell types -d .
 gpui-shell run -d . --watch
 ```

@@ -1,5 +1,5 @@
 #!/bin/sh
-# curl -fsSL https://raw.githubusercontent.com/huacnlee/gpui-shell-mail-example/main/install.sh | sh
+# curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-mail/main/install.sh | sh
 set -eu
 
 app_source=''
@@ -87,7 +87,7 @@ if [ -n "$app_source" ]; then
 else
   echo 'Downloading Folio Desk…'
   curl --fail --show-error --silent --location --retry 3 \
-    https://codeload.github.com/huacnlee/gpui-shell-mail-example/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
+    https://codeload.github.com/huacnlee/folio-mail/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
   mkdir "$stage/source"
   tar -xzf "$stage/mail.tar.gz" -C "$stage/source" --strip-components=1
   for file in main.js mailbox.js theme.js gpui-shell.json; do
