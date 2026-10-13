@@ -14,7 +14,8 @@ const files = new Map();
 const runs = [];
 const toasts = [];
 const context = vm.createContext({
-  console, TextDecoder, TextEncoder,
+  // Only what gpui-shell provides: QuickJS has no TextEncoder or TextDecoder.
+  console,
   localStorage: { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) },
   window: { push_toast: (t) => toasts.push(t), paint_path: () => ({}) },
 });

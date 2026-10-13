@@ -7,7 +7,7 @@ A native desktop Gmail client and mail demo built with [gpui-shell](https://gpui
 ## Reference
 
 - The visual design — paper surfaces, narrow icon rail, grouped Correspondence list, context card and letter layout — is recreated from a third-party mail app design shot; colours, illustrations and copy were changed. *Original design link: to be added.*
-- Design and product ideas belong to their original author. The code is MIT; see the [repository README](../../README.md#协议) for the licence terms, including no commercial use of the design.
+- Design and product ideas belong to their original author. The code is MIT; see the [repository README](../../README.md#license) for the licence terms, including no commercial use of the design.
 
 ## Install
 

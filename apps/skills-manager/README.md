@@ -7,7 +7,7 @@ A native desktop manager for agent skills (folders holding a `SKILL.md`), writte
 ## Reference
 
 - Recreated from a design shot of a "Skills — Manage all your agent skills" page (Installed / Discover tabs, Recommended / New skills / Most installed card groups). *Original design link: to be added.*
-- Design and product ideas belong to their original author. The code is MIT; see the [repository README](../../README.md#协议) for the licence terms, including no commercial use of the design.
+- Design and product ideas belong to their original author. The code is MIT; see the [repository README](../../README.md#license) for the licence terms, including no commercial use of the design.
 
 ## Run it
 
