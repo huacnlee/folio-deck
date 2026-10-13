@@ -4,6 +4,8 @@ A desktop PDF signing tool for [gpui-shell](https://gpui-kit.com/shell/), writte
 
 Built from scratch by an AI coding agent as one of the gpui-shell AI-friendliness benchmarks in this repository.
 
+<img width="1152" height="980" alt="image" src="https://github.com/user-attachments/assets/cc120a32-939f-4a6c-b330-f89f906bf6c1" />
+
 ## Reference
 
 - Inspired by **[omacom/signed](https://github.com/omacom/signed)** — its feature set (place a signature, text and date on a PDF, save a signed copy, S/T/D shortcuts, `[ ]` resizing) and the screenshot it was briefed from.
