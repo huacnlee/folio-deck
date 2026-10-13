@@ -1,5 +1,5 @@
 #!/bin/sh
-# curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-mail/main/install.sh | sh
+# curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-deck/main/install.sh | sh
 set -eu
 
 app_source=''
@@ -39,7 +39,9 @@ done
 if [ "$system" = linux ]; then
   command -v xdg-mime >/dev/null 2>&1 || { echo 'Install xdg-utils for the launch link.' >&2; exit 1; }
 else
-  command -v osacompile >/dev/null 2>&1 || { echo 'Missing macOS osacompile.' >&2; exit 1; }
+  for utility in osacompile codesign; do
+    command -v "$utility" >/dev/null 2>&1 || { echo "Missing macOS $utility." >&2; exit 1; }
+  done
 fi
 
 # Tilde resolves the current account; no environment overrides or PATH changes.
@@ -87,7 +89,7 @@ if [ -n "$app_source" ]; then
 else
   echo 'Downloading Folio Desk…'
   curl --fail --show-error --silent --location --retry 3 \
-    https://codeload.github.com/huacnlee/folio-mail/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
+    https://codeload.github.com/huacnlee/folio-deck/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
   mkdir "$stage/source"
   tar -xzf "$stage/mail.tar.gz" -C "$stage/source" --strip-components=1
   for file in main.js mailbox.js theme.js gpui-shell.json; do
@@ -102,20 +104,6 @@ elif [ -f "$stage/source/LICENSE" ]; then
   cp "$stage/source/LICENSE" "$stage/app/"
 fi
 
-# Validate before replacing an installed copy. The manifest id keeps local data.
-"$shell_path" check -d "$stage/app"
-if [ -L "$app_dir" ]; then
-  echo "Refusing to replace the linked application: $app_dir" >&2
-  exit 1
-fi
-if [ -e "$app_dir" ]; then
-  mv "$app_dir" "$stage/previous"
-fi
-if ! mv "$stage/app" "$app_dir"; then
-  [ ! -e "$stage/previous" ] || mv "$stage/previous" "$app_dir"
-  exit 1
-fi
-
 # The URI is validated and never interpolated into a command.
 cat > "$stage/folio-mail" <<'LAUNCHER'
 #!/bin/sh
@@ -125,11 +113,22 @@ case "${1:-}" in
   *) echo 'Supported launch link: folio-mail://open' >&2; exit 2 ;;
 esac
 [ "$#" -le 1 ] || { echo 'Unexpected launch arguments' >&2; exit 2; }
-exec ~/.local/bin/gpui-shell run -d ~/.gpui-shell/apps/folio-mail
 LAUNCHER
-install -m 755 "$stage/folio-mail" "$bin_dir/folio-mail"
 
 if [ "$system" = linux ]; then
+  # Validate before replacing an installed copy. Keep its stable data location.
+  "$shell_path" check -d "$stage/app"
+  if [ -L "$app_dir" ]; then
+    echo "Refusing to replace the linked application: $app_dir" >&2
+    exit 1
+  fi
+  if [ -e "$app_dir" ]; then mv "$app_dir" "$stage/previous"; fi
+  if ! mv "$stage/app" "$app_dir"; then
+    [ ! -e "$stage/previous" ] || mv "$stage/previous" "$app_dir"
+    exit 1
+  fi
+  echo 'exec ~/.local/bin/gpui-shell run -d ~/.gpui-shell/apps/folio-mail' >> "$stage/folio-mail"
+  install -m 755 "$stage/folio-mail" "$bin_dir/folio-mail"
   desktop_dir=~/.local/share/applications
   mkdir -p "$desktop_dir"
   # Desktop Exec quoting has its own grammar; escape account paths literally.
@@ -150,35 +149,77 @@ DESKTOP
   if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$desktop_dir"; fi
   xdg-mime default folio-mail.desktop x-scheme-handler/folio-mail
 else
-  # A native AppleScript application receives open-location Apple Events.
+  # Package both the runtime and app. The AppleScript executable only handles
+  # Finder/URL events; it resolves the bundled runtime relative to the .app.
   applications_dir=~/Applications
+  bundle="$stage/Folio Desk.app"
   mkdir -p "$applications_dir"
-  applescript_path=$(printf '%s' "$bin_dir/folio-mail" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  cat > "$stage/launch.applescript" <<APPLESCRIPT
+  cat > "$stage/launch.applescript" <<'APPLESCRIPT'
+on launchFolio()
+  set bundlePath to POSIX path of (path to me)
+  set runtimePath to bundlePath & "Contents/MacOS/gpui-shell"
+  set appPath to bundlePath & "Contents/Resources/app"
+  do shell script "nohup " & quoted form of runtimePath & " run -d " & quoted form of appPath & " >/dev/null 2>&1 &"
+end launchFolio
 on run
-  do shell script "nohup " & quoted form of "$applescript_path" & " >/dev/null 2>&1 &"
+  launchFolio()
 end run
 on open location address
   if address is "folio-mail://open" or address is "folio-mail://open/" then
-    run
+    launchFolio()
   end if
 end open location
 APPLESCRIPT
-  osacompile -o "$stage/Folio Desk.app" "$stage/launch.applescript"
-  /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.folio.mail.launcher' "$stage/Folio Desk.app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes array' "$stage/Folio Desk.app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0 dict' "$stage/Folio Desk.app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLName string Folio Desk' "$stage/Folio Desk.app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array' "$stage/Folio Desk.app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string folio-mail' "$stage/Folio Desk.app/Contents/Info.plist"
-  # Only replace the launcher bundle created by this installer.
-  if [ -e "$applications_dir/Folio Desk.app" ]; then
-    bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$applications_dir/Folio Desk.app/Contents/Info.plist")
-    [ "$bundle_id" = com.folio.mail.launcher ] || { echo 'An unrelated Folio Desk.app already exists.' >&2; exit 1; }
-    mv "$applications_dir/Folio Desk.app" "$stage/previous-launcher.app"
+  osacompile -o "$bundle" "$stage/launch.applescript"
+  mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+  install -m 755 "$shell_path" "$bundle/Contents/MacOS/gpui-shell"
+  cp -R "$stage/app" "$bundle/Contents/Resources/app"
+  plist="$bundle/Contents/Info.plist"
+  # osacompile already supplies some keys. Set first, then Add if absent.
+  # Unconditional Add used to abort here when CFBundleIdentifier existed.
+  plist_set() {
+    /usr/libexec/PlistBuddy -c "Set :$1 $3" "$plist" 2>/dev/null ||
+      /usr/libexec/PlistBuddy -c "Add :$1 $2 $3" "$plist"
+  }
+  plist_set CFBundleIdentifier string com.folio.desk
+  plist_set CFBundleName string 'Folio Desk'
+  plist_set CFBundleDisplayName string 'Folio Desk'
+  plist_set CFBundleShortVersionString string 0.1.0
+  plist_set CFBundleVersion string 1
+  plist_set LSApplicationCategoryType string public.app-category.productivity
+  /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes array' "$plist"
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0 dict' "$plist"
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleTypeRole string Viewer' "$plist"
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLName string Folio Desk' "$plist"
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array' "$plist"
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string folio-mail' "$plist"
+  # Re-sign the assembled bundle after changing its resources and metadata.
+  codesign --force --deep --sign - "$bundle"
+  codesign --verify --deep --strict "$bundle"
+  "$bundle/Contents/MacOS/gpui-shell" check -d "$bundle/Contents/Resources/app"
+  destination="$applications_dir/Folio Desk.app"
+  if [ -L "$destination" ]; then
+    echo "Refusing to replace the linked application: $destination" >&2
+    exit 1
   fi
-  mv "$stage/Folio Desk.app" "$applications_dir/Folio Desk.app"
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$applications_dir/Folio Desk.app"
+  if [ -e "$destination" ]; then
+    bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$destination/Contents/Info.plist")
+    case "$bundle_id" in
+      com.folio.desk | com.folio.mail.launcher) ;;
+      *) echo 'An unrelated Folio Desk.app already exists.' >&2; exit 1 ;;
+    esac
+    mv "$destination" "$stage/previous-bundle.app"
+  fi
+  if ! mv "$bundle" "$destination"; then
+    [ ! -e "$stage/previous-bundle.app" ] || mv "$stage/previous-bundle.app" "$destination"
+    exit 1
+  fi
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$destination"
+  echo 'exec /usr/bin/open ~/Applications/"Folio Desk.app"' >> "$stage/folio-mail"
+  install -m 755 "$stage/folio-mail" "$bin_dir/folio-mail"
+  echo "Application: $destination"
+
 fi
 
 echo ''

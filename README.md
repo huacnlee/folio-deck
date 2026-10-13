@@ -9,12 +9,12 @@ A native desktop mail demo built with [gpui-shell](https://gpui-kit.com/shell/) 
 Install the runtime and mail app with one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-mail/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-deck/main/install.sh | sh
 ```
 
 The installer supports Linux x86_64 and macOS Intel / Apple Silicon. It installs gpui-shell v0.7.3 when no compatible runtime exists in `~/.local/bin`, verifies the release's SHA-256 checksum, downloads the app, and checks it before replacing an existing installation. No sudo, Git, Node, or Rust toolchain is required. Linux requires `xdg-utils` for launch links; curl, tar, and a SHA-256 utility are required on both platforms.
 
-The app lives in `~/.gpui-shell/apps/folio-mail`. Re-running the installer updates it; locally saved drafts and completed demo actions remain at the same app location. A linked application is preserved rather than overwritten.
+On Linux, the app lives in `~/.gpui-shell/apps/folio-mail`. On macOS, it installs a complete `~/Applications/Folio Desk.app` containing its own gpui-shell binary and `Contents/Resources/app`; it can be launched from Finder without the copies in `~/.local/bin` or `~/.gpui-shell/apps`. Re-running the installer updates it; locally saved drafts and completed demo actions remain at the same app location. A linked application is preserved rather than overwritten.
 
 To install your local checkout:
 
@@ -25,7 +25,7 @@ sh install.sh --app-source .
 Append `--launch` to open it after installation. For example:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-mail/main/install.sh | sh -s -- --launch
+curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-deck/main/install.sh | sh -s -- --launch
 ```
 
 ## Launch
@@ -36,13 +36,13 @@ After installation, open **[Folio Desk](folio-mail://open)**, select **Folio Des
 ~/.local/bin/folio-mail
 ```
 
-The installer registers the `folio-mail://open` URL scheme with a Linux desktop entry or a macOS application in `~/Applications`. If your browser or Markdown viewer does not allow custom links, use the terminal command or application launcher. The launch handler accepts only the exact open URI; it does not execute commands from a URL.
+The installer registers the `folio-mail://open` URL scheme with a Linux desktop entry or a self-contained macOS `.app` in `~/Applications`. If your browser or Markdown viewer does not allow custom links, use the terminal command or application launcher. The launch handler accepts only the exact open URI; it does not execute commands from a URL.
 
 ## Develop
 
 ```bash
-git clone https://github.com/huacnlee/folio-mail.git
-cd folio-mail
+git clone https://github.com/huacnlee/folio-deck.git
+cd folio-deck
 gpui-shell types -d .
 gpui-shell run -d . --watch
 ```
@@ -79,3 +79,5 @@ python3 scripts/check-states.py
 ```
 
 The installer tests run in disposable directories inside this checkout with mocked downloads and desktop registration. They do not change HOME or PATH, install software, or alter your desktop settings. Native state checks materialize editing, assistant, rewriting, attachment preview, sending, offline, sent, no-results, and dismissed views. `check` verifies loading and materialization; inspect layout and interactions in a real window as well.
+
+The installer workflow builds and validates the actual `.app` on Apple Silicon and Intel macOS runners, including reinstallation, AppleScript compilation, bundle signing, and native runtime checks. Local installer tests mock macOS system tools; they do not replace these platform checks.

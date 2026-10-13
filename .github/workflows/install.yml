@@ -1,0 +1,44 @@
+name: Validate installer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax and installer behavior
+        run: |
+          sh -n install.sh
+          python3 tests/install_test.py
+
+  macos-bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install and upgrade the complete application
+        run: |
+          sh install.sh --app-source .
+          sh install.sh --app-source .
+      - name: Verify the native bundle and bundled runtime
+        run: |
+          test -x ~/Applications/"Folio Desk.app"/Contents/MacOS/applet
+          test -x ~/Applications/"Folio Desk.app"/Contents/MacOS/gpui-shell
+          test -f ~/Applications/"Folio Desk.app"/Contents/Resources/app/main.js
+          plutil -lint ~/Applications/"Folio Desk.app"/Contents/Info.plist
+          codesign --verify --deep --strict ~/Applications/"Folio Desk.app"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ~/Applications/"Folio Desk.app"/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' ~/Applications/"Folio Desk.app"/Contents/Info.plist
+          ~/Applications/"Folio Desk.app"/Contents/MacOS/gpui-shell check -d ~/Applications/"Folio Desk.app"/Contents/Resources/app
