@@ -1,0 +1,20 @@
+{
+  "id": "com.huacnlee.ocean-view",
+  "name": "OceanView",
+  "version": "0.1.0",
+  "shell-version": "0.7.3",
+  "entry": "main.js",
+  "capabilities": {
+    "storage": true,
+    "fs": {
+      "write": ["${dataDir}"]
+    },
+    "clipboard": {
+      "write": true
+    }
+  },
+  "window": {
+    "width": 1536,
+    "height": 1024
+  }
+}
