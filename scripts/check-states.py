@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='.native-', dir=root / 'tests') as direc
     app = Path(directory)
     shutil.copytree(root / 'forma', app / 'forma')
     shutil.copyfile(root / 'main.js', app / 'view.js')
-    for file in ['theme.js', 'mailbox.js']:
+    for file in ['theme.js', 'mailbox.js', 'gmail.js', 'gmail-view.js', 'oauth-callback.js', 'oauth-runtime.js']:
         shutil.copyfile(root / file, app / file)
     manifest = json.loads((root / 'gpui-shell.json').read_text())
     manifest.update(id='com.folio.native-check', entry='main.js')
@@ -34,6 +34,7 @@ import {{ Mailbox, contacts }} from './mailbox.js';
 export default class CheckState extends StudioDemo {{
   init(props, cx) {{
     super.init(props, cx);
+    this.mode = 'demo';
     this.mailbox = new Mailbox();
     {setup}
   }}

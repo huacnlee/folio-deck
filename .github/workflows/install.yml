@@ -17,6 +17,7 @@ jobs:
       - name: Check shell syntax and installer behavior
         run: |
           sh -n install.sh
+          node --experimental-vm-modules --test tests/*.test.mjs
           python3 tests/install_test.py
 
   macos-bundle:
@@ -28,6 +29,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test OAuth transport and Gmail logic
+        run: node --experimental-vm-modules --test tests/*.test.mjs
       - name: Install and upgrade the complete application
         run: |
           sh install.sh --app-source .

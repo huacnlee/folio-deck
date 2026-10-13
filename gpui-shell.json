@@ -5,7 +5,50 @@
   "shell-version": "0.7.3",
   "entry": "main.js",
   "capabilities": {
-    "storage": true
+    "storage": true,
+    "network": {
+      "http": [
+        {
+          "scheme": "https",
+          "host": "oauth2.googleapis.com",
+          "methods": [
+            "POST"
+          ],
+          "paths": [
+            "/token"
+          ]
+        },
+        {
+          "scheme": "https",
+          "host": "gmail.googleapis.com",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "path_prefixes": [
+            "/gmail/v1/users/me/"
+          ]
+        },
+        {
+          "scheme": "http",
+          "host": "127.0.0.1",
+          "port": 9481,
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "paths": [
+            "/result",
+            "/cancel"
+          ]
+        }
+      ]
+    },
+    "fs": {
+      "execute": [
+        "node"
+      ]
+    }
   },
   "window": {
     "width": 1280,

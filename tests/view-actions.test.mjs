@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { Buffer } from 'node:buffer';
+import { createHash, randomBytes } from 'node:crypto';
 import { Mailbox, draftText } from '../mailbox.js';
 
 // Link the production view to a minimal host: test owner commands and async
@@ -18,7 +20,7 @@ async function moduleAt(path) {
   modules.set(path, module);
   await module.link(async specifier => {
     if (specifier.startsWith('./')) return moduleAt('../' + specifier.slice(2));
-    const exports = specifier === 'gpui-kit' ? { View: class {}, div() {}, image() {}, svg() {} }
+    const exports = specifier === 'process' ? { default: { run() {} } } : specifier === 'buffer' ? { Buffer } : specifier === 'crypto' ? { createHash, randomBytes } : specifier === 'gpui-kit' ? { View: class {}, div() {}, image() {}, svg() {} }
       : specifier === 'gpui-base' ? { h_flex() {}, v_flex() {}, h_resizable() {}, resizable_panel() {}, set_theme() {} }
         : Object.fromEntries(['Button', 'TitleBar', 'InputState', 'TextareaState', 'InputGroup', 'InputGroupInput', 'InputGroupTextarea'].map(name => [name, () => {}]));
     return new vm.SyntheticModule(Object.keys(exports), function () {

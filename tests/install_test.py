@@ -1,6 +1,7 @@
 """Exercise the real installer in a disposable tree, without changing HOME/PATH."""
 import hashlib
 import io
+import json
 import plistlib
 import shutil
 import struct
@@ -33,8 +34,9 @@ class InstallTest(unittest.TestCase):
         self.fake.mkdir()
         self.source = self.root / 'source'
         self.source.mkdir()
-        for file in ['main.js', 'mailbox.js', 'theme.js', 'gpui-shell.json']:
+        for file in ['main.js', 'mailbox.js', 'theme.js', 'gmail.js', 'gmail-view.js', 'oauth-callback.js', 'oauth-runtime.js', 'gpui-shell.json']:
             (self.source / file).write_text('sample')
+        (self.source / 'gpui-shell.json').write_text((ROOT / 'gpui-shell.json').read_text())
         (self.source / 'forma').mkdir()
         (self.source / 'forma/icon.svg').write_text('<svg/>')
         (self.source / 'forma/assets').mkdir()
@@ -66,6 +68,10 @@ class InstallTest(unittest.TestCase):
             result = self.run_installer()
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.app / 'main.js').is_file())
+        self.assertTrue((self.app / 'oauth-callback.js').is_file())
+        executable = json.loads((self.app / 'gpui-shell.json').read_text())['capabilities']['fs']['execute'][0]
+        self.assertTrue(Path(executable).is_absolute())
+        self.assertIn(executable, (self.app / 'oauth-runtime.js').read_text())
         self.assertIn('x-scheme-handler/folio-mail', (self.root / 'mime-call').read_text())
         desktop = (self.root / '.local/share/applications/folio-mail.desktop').read_text()
         self.assertIn(' %u', desktop)

@@ -2,6 +2,7 @@ import { View, div, image, svg } from 'gpui-kit';
 import { h_flex, v_flex, h_resizable, resizable_panel, set_theme } from 'gpui-base';
 import { Button, TitleBar, InputState, TextareaState, InputGroup, InputGroupInput, InputGroupTextarea } from 'gpui-component';
 import { studioColors } from './theme.js';
+import GmailView from './gmail-view.js';
 import { contacts, notes, groups, draftText, Mailbox } from './mailbox.js';
 
 const asset = name => `forma/assets/${name}.svg`;
@@ -46,6 +47,8 @@ export default class StudioDemo extends View {
       radius: { none: 0, sm: 4, md: 6, lg: 8, xl: 12, full: 9999 },
       typography: { sans: 'Helvetica Neue', md: { size: 13 }, sm: { size: 12 } },
     } });
+    this.mode = localStorage.getItem('folio-gmail-session-v1') ? 'gmail' : 'demo';
+    this.gmailView = cx.new(GmailView);
   }
 
   persist() { localStorage.setItem(storageKey, JSON.stringify(this.mailbox.snapshot())); }
@@ -334,6 +337,12 @@ export default class StudioDemo extends View {
   }
 
   render(cx) {
+    if (this.mode === 'gmail') return v_flex().size_full().font_family('Helvetica Neue').text_size(13)
+      .text_color(cx.theme().colors.foreground).bg(cx.theme().colors.background)
+      .on_action('folio-preview', (_event, cx) => { this.mode = 'demo'; cx.notify(); })
+      .child(component(TitleBar).h(30).bg(cx.theme().colors.secondary)
+        .child(text('FOLIO  /  CORRESPONDENCE', cx, 10, true).font_medium()))
+      .child(div().flex_1().min_h_0().child(this.gmailView));
     return v_flex().size_full().track_focus(this.rootFocus).font_family('Helvetica Neue').text_size(13)
       .text_color(cx.theme().colors.foreground).bg(cx.theme().colors.background)
       .key_context('FolioMail')
@@ -359,6 +368,7 @@ export default class StudioDemo extends View {
         .child(text(this.notice || 'Demo workspace · no email is delivered', cx, 11, true).truncate())
         .child(div().flex_1())
         .when(this.undoId, el => el.child(component(Button, 'undo-dismiss').ghost().size('xsmall').label('Undo dismiss').on_click((_event, cx) => this.undo(cx))))
+        .child(component(Button, 'open-gmail').ghost().size('xsmall').label('Connect Gmail…').on_click((_event, cx) => { this.mode = 'gmail'; cx.notify(); }))
         .child(text('Alt ↑ ↓   Navigate     Ctrl / ⌘ ↵   Send', cx, 10, true)));
   }
 }

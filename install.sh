@@ -33,7 +33,7 @@ if [ "$system" = linux ] && [ "$(uname -m)" != x86_64 ]; then
   echo 'The gpui-shell release currently provides Linux binaries for x86_64 only.' >&2
   exit 1
 fi
-for utility in curl tar install mktemp; do
+for utility in curl tar install mktemp node; do
   command -v "$utility" >/dev/null 2>&1 || { echo "Missing dependency: $utility" >&2; exit 1; }
 done
 if [ "$system" = linux ]; then
@@ -43,6 +43,7 @@ else
     command -v "$utility" >/dev/null 2>&1 || { echo "Missing macOS $utility." >&2; exit 1; }
   done
 fi
+node -e 'if (Number(process.versions.node.split(".")[0]) < 20) { console.error("Gmail authorization requires Node.js 20 or newer."); process.exit(1); }'
 
 # Tilde resolves the current account; no environment overrides or PATH changes.
 bin_dir=~/.local/bin
@@ -84,7 +85,7 @@ fi
 mkdir "$stage/app"
 if [ -n "$app_source" ]; then
   # Copy only application assets; exclude Git history and unrelated local files.
-  cp "$app_source/main.js" "$app_source/mailbox.js" "$app_source/theme.js" "$app_source/gpui-shell.json" "$stage/app/"
+  cp "$app_source/main.js" "$app_source/mailbox.js" "$app_source/theme.js" "$app_source/gmail.js" "$app_source/gmail-view.js" "$app_source/oauth-callback.js" "$app_source/oauth-runtime.js" "$app_source/gpui-shell.json" "$stage/app/"
   cp -R "$app_source/forma" "$stage/app/"
 else
   echo 'Downloading Folio Desk…'
@@ -92,11 +93,23 @@ else
     https://codeload.github.com/huacnlee/folio-deck/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
   mkdir "$stage/source"
   tar -xzf "$stage/mail.tar.gz" -C "$stage/source" --strip-components=1
-  for file in main.js mailbox.js theme.js gpui-shell.json; do
+  for file in main.js mailbox.js theme.js gmail.js gmail-view.js oauth-callback.js oauth-runtime.js gpui-shell.json; do
     cp "$stage/source/$file" "$stage/app/"
   done
   cp -R "$stage/source/forma" "$stage/app/"
 fi
+
+# Finder does not inherit a terminal's Node search path. Record the verified
+# system executable and grant that exact command, without modifying PATH.
+node - "$stage/app" <<'NODE'
+const fs = require('node:fs');
+const app = process.argv[2];
+const executable = process.execPath;
+fs.writeFileSync(app + '/oauth-runtime.js', 'export const nodeCommand = ' + JSON.stringify(executable) + ';\n');
+const manifest = JSON.parse(fs.readFileSync(app + '/gpui-shell.json', 'utf8'));
+manifest.capabilities.fs.execute = [executable];
+fs.writeFileSync(app + '/gpui-shell.json', JSON.stringify(manifest, null, 2) + '\n');
+NODE
 
 if [ -n "$app_source" ] && [ -f "$app_source/LICENSE" ]; then
   cp "$app_source/LICENSE" "$stage/app/"
