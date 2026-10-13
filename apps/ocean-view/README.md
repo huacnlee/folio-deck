@@ -2,6 +2,8 @@
 
 A native fleet-tracking dashboard built with [gpui-shell](https://gpui-kit.com/shell/), recreating the OceanView concept by [@IamMuhammadMuiz](https://x.com/IamMuhammadMuiz/status/2109684343941554293). Five container ships sail real sea lanes on a live Mercator map; their position, ETA, fuel and alerts are calculated, not drawn from fixed numbers.
 
+<img width="1461" height="940" alt="image" src="https://github.com/user-attachments/assets/89f3da22-4ce3-4123-a5d3-af5d52b46277" />
+
 ## Reference
 
 - Recreated from the **OceanView** fleet-tracking concept by [@IamMuhammadMuiz](https://x.com/IamMuhammadMuiz/status/2109684343941554293) — its layout (sidebar, live map with vessel cards, Route & Position, Speed & Course, Fuel & Consumption and Recent Alerts) and the screenshot it was briefed from.
