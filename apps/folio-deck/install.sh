@@ -1,5 +1,5 @@
 #!/bin/sh
-# curl -fsSL https://raw.githubusercontent.com/huacnlee/folio-deck/main/install.sh | sh
+# curl -fsSL https://raw.githubusercontent.com/huacnlee/gpui-shell-benchs/main/apps/folio-deck/install.sh | sh
 set -eu
 
 app_source=''
@@ -90,13 +90,15 @@ if [ -n "$app_source" ]; then
 else
   echo 'Downloading Folio Desk…'
   curl --fail --show-error --silent --location --retry 3 \
-    https://codeload.github.com/huacnlee/folio-deck/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
+    https://codeload.github.com/huacnlee/gpui-shell-benchs/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
   mkdir "$stage/source"
   tar -xzf "$stage/mail.tar.gz" -C "$stage/source" --strip-components=1
+  # The benchmark repository keeps each application under apps/<name>.
+  source_dir="$stage/source/apps/folio-deck"
   for file in main.js mailbox.js theme.js gmail.js gmail-view.js avatar.js oauth-callback.js oauth-runtime.js gpui-shell.json; do
-    cp "$stage/source/$file" "$stage/app/"
+    cp "$source_dir/$file" "$stage/app/"
   done
-  cp -R "$stage/source/forma" "$stage/app/"
+  cp -R "$source_dir/forma" "$stage/app/"
 fi
 
 # Finder does not inherit a terminal's Node search path. Record the verified

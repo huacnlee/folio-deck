@@ -1,13 +1,19 @@
-name: Validate installer
+name: Folio Desk
 
 on:
   push:
     branches: [main]
+    paths: [apps/folio-deck/**, .github/workflows/folio-deck.yml]
   pull_request:
+    paths: [apps/folio-deck/**, .github/workflows/folio-deck.yml]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: apps/folio-deck
 
 jobs:
   installer-tests:

@@ -1,7 +1,9 @@
 gpui-kit.d.ts
 .DS_Store
 dist/
-tests/*-preview.png
-tests/.installer-*
-tests/.native-*
+node_modules/
 __pycache__/
+**/tests/*-preview.png
+**/tests/.installer-*
+**/tests/.native-*
+**/tests/installed.iconset/

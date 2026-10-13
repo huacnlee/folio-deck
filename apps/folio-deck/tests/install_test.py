@@ -289,7 +289,7 @@ seal.write_text(json.dumps(files))
     def test_remote_app_archive_installs_without_git(self):
         archive = self.root / 'mail.tar.gz'
         with tarfile.open(archive, 'w:gz') as bundle:
-            bundle.add(self.source, arcname='folio-deck-main')
+            bundle.add(self.source, arcname='gpui-shell-benchs-main/apps/folio-deck')
         self.write_executable(self.fake / 'curl', f'''#!/bin/sh
 output=''
 while [ "$#" -gt 0 ]; do
