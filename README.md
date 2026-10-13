@@ -17,7 +17,7 @@ curl -fsSL https://gpui-kit.com/shell/install.sh | sh
 ```bash
 git clone https://github.com/huacnlee/gpui-shell-mail-example.git
 cd gpui-shell-mail-example
-gpui-shell run --dir . --watch
+gpui-shell run --dev
 ```
 
 ## Features
@@ -39,5 +39,5 @@ All contacts and email addresses are sample data. Sending and attachments are si
 ## Check
 
 ```bash
-gpui-shell check --dir .
+gpui-shell check
 ```
