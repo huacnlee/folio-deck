@@ -1,2 +1,7 @@
 gpui-kit.d.ts
 .DS_Store
+
+tests/*-preview.png
+tests/.installer-*
+tests/.native-*
+__pycache__/
