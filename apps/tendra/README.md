@@ -8,7 +8,7 @@
 > 声明：本示例仅借用 Tendra 的概念设计稿，尝试用 gpui-shell 做一个 demo，
 > 并非真实产品，与原作者无关，数据均为虚构。
 
-<img width="1430" height="881" alt="image" src="https://github.com/user-attachments/assets/2ae8d752-49c2-4373-a66f-f7f90f4481bc" />
+<img width="1440" height="914" alt="image" src="https://github.com/user-attachments/assets/f5f8a633-cca4-48a8-b44c-e727f8891d48" />
 
 ## Original design
 
