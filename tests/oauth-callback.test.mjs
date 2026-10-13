@@ -4,8 +4,10 @@ import { spawn } from 'node:child_process';
 import { CallbackListener } from '../oauth-callback.js';
 import { beginAuthorization, REDIRECT_URI } from '../gmail.js';
 
+// An empty environment mimics a Finder launch, which has no PATH. The
+// installer records node's absolute path for that reason, so the test does too.
 const execute = (command,args) => new Promise((resolve,reject) => {
-  const child = spawn(command,args,{env:{}});
+  const child = spawn(command === 'node' ? process.execPath : command,args,{env:{}});
   let stdout='',stderr='';
   child.stdout.on('data',chunk => stdout+=chunk); child.stderr.on('data',chunk => stderr+=chunk);
   child.on('error',reject); child.on('close',code => resolve({code,stdout,stderr}));
