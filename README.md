@@ -59,10 +59,10 @@ Time and tokens come from the agents' local transcripts (see [Measuring](#measur
     </tr>
     <tr>
       <td><a href="apps/folio-deck">folio-deck</a>&nbsp;(phase&nbsp;2)</td>
-      <td>Codex&nbsp;(assumed)</td>
+      <td>Codex&nbsp;·&nbsp;gpt-6.1-sol</td>
       <td align="right">≈515&nbsp;min*</td>
       <td align="right">≈60&nbsp;min*</td>
-      <td align="right">—</td>
+      <td align="right">≈15</td>
       <td align="right">≈27,000*</td>
       <td align="right">≈6,800,000*</td>
       <td>Done,&nbsp;estimated</td>
@@ -135,7 +135,7 @@ Time and tokens come from the agents' local transcripts (see [Measuring](#measur
 
 Notes:
 
-- **folio-deck** phase 1 is the Codex session before commit `59c1cc1` (2026-10-13 09:52): it started at 00:07 and paused overnight, hence the gap between wall and active time. Phase 2 (Gmail, local cache, installer and macOS bundle) has no transcript in any local Codex (current or archived), Claude Code or other agent session store, so its tokens cannot be counted. *Its figures are estimates: wall time from commits (`6a98b83` at 10:20 to `ea51ddc` at 18:55); about 60 minutes of active work as reported by the author; tokens scaled from phase 1's measured Codex rate (6,901,473 tokens in 61 active minutes ≈ 113k per minute, with the same input/cache/output split). Replace the row with `session-stats.py` output if the transcript turns up.
+- **folio-deck** phase 1 is the Codex session before commit `59c1cc1` (2026-10-13 09:52): it started at 00:07 and paused overnight, hence the gap between wall and active time. Phase 2 (Gmail, local cache, installer and macOS bundle) has no transcript in any local Codex (current or archived), Claude Code or other agent session store, so its tokens cannot be counted. *Its figures are estimates: wall time from commits (`6a98b83` at 10:20 to `ea51ddc` at 18:55); about 60 minutes of active work and about 15 prompts, all asking for fixes to Mail details, as reported by the author; tokens scaled from phase 1's measured rate (same agent and model, Codex with gpt-6.1-sol) (6,901,473 tokens in 61 active minutes ≈ 113k per minute, with the same input/cache/output split). Replace the row with `session-stats.py` output if the transcript turns up.
 - **tendra** was a standalone repository, [huacnlee/tendra](https://github.com/huacnlee/tendra), imported unchanged. Its session includes about 50 minutes of wrap-up and context compaction after the last commit.
 - **ocean-view**, **signed** and **skills-manager** were built in parallel by three subagents of one Claude Code session, each measured from its own transcript (`<session>/subagents/agent-*.jsonl`). Subagents inherit the parent's context, which is included in their cache reads. Prompts count the requirements relayed by the parent plus the messages sent straight to the subagent (19 for signed, 4 for ocean-view). ocean-view ran in two rounds: the first build, then map dragging, zooming, click and layout fixes.
 - Fixes made afterwards in the parent session (for example the `TextEncoder` crash in signed) are not included.
