@@ -1,0 +1,34 @@
+{
+  "id": "com.huacnlee.skills-manager",
+  "name": "Skills",
+  "version": "0.1.0",
+  "shell-version": "0.7.3",
+  "entry": "main.js",
+  "capabilities": {
+    "storage": true,
+    "fs": {
+      "read": ["${dataDir}"],
+      "write": ["${dataDir}"]
+    },
+    "network": {
+      "http": [
+        {
+          "host": "api.github.com",
+          "methods": ["GET"],
+          "paths": ["/repos/anthropics/skills", "/repos/openai/skills", "/repos/vercel-labs/agent-skills"],
+          "path_prefixes": [
+            "/repos/anthropics/skills/git/",
+            "/repos/openai/skills/git/",
+            "/repos/vercel-labs/agent-skills/git/"
+          ]
+        },
+        {
+          "host": "raw.githubusercontent.com",
+          "methods": ["GET"],
+          "path_prefixes": ["/anthropics/skills/", "/openai/skills/", "/vercel-labs/agent-skills/"]
+        }
+      ]
+    }
+  },
+  "window": { "width": 1440, "height": 960 }
+}

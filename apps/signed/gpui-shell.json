@@ -1,0 +1,28 @@
+{
+  "id": "com.huacnlee.signed",
+  "name": "Signed",
+  "version": "0.1.0",
+  "shell-version": "0.7.3",
+  "entry": "main.js",
+  "capabilities": {
+    "storage": true,
+    "fs": {
+      "read": [
+        "${dataDir}"
+      ],
+      "write": [
+        "${dataDir}"
+      ],
+      "execute": [
+        "base64",
+        "osascript",
+        "open",
+        "xdg-open"
+      ]
+    }
+  },
+  "window": {
+    "width": 1040,
+    "height": 868
+  }
+}
