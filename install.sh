@@ -39,7 +39,7 @@ done
 if [ "$system" = linux ]; then
   command -v xdg-mime >/dev/null 2>&1 || { echo 'Install xdg-utils for the launch link.' >&2; exit 1; }
 else
-  for utility in osacompile codesign; do
+  for utility in osacompile codesign iconutil; do
     command -v "$utility" >/dev/null 2>&1 || { echo "Missing macOS $utility." >&2; exit 1; }
   done
 fi
@@ -174,6 +174,12 @@ APPLESCRIPT
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
   install -m 755 "$shell_path" "$bundle/Contents/MacOS/gpui-shell"
   cp -R "$stage/app" "$bundle/Contents/Resources/app"
+  iconutil -c icns "$stage/app/forma/assets/FolioDesk.iconset" -o "$bundle/Contents/Resources/FolioDesk.icns"
+  # The compiled AppleScript asset catalog can override CFBundleIconFile.
+  # Remove its default icon catalog from this staged bundle before signing.
+  if [ -f "$bundle/Contents/Resources/Assets.car" ]; then
+    mv "$bundle/Contents/Resources/Assets.car" "$stage/applescript-assets.car"
+  fi
   plist="$bundle/Contents/Info.plist"
   # osacompile already supplies some keys. Set first, then Add if absent.
   # Unconditional Add used to abort here when CFBundleIdentifier existed.
@@ -184,8 +190,10 @@ APPLESCRIPT
   plist_set CFBundleIdentifier string com.folio.desk
   plist_set CFBundleName string 'Folio Desk'
   plist_set CFBundleDisplayName string 'Folio Desk'
+  /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$plist" 2>/dev/null || true
+  plist_set CFBundleIconFile string FolioDesk.icns
   plist_set CFBundleShortVersionString string 0.1.0
-  plist_set CFBundleVersion string 1
+  plist_set CFBundleVersion string 2
   plist_set LSApplicationCategoryType string public.app-category.productivity
   /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes array' "$plist"

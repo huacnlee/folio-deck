@@ -80,4 +80,6 @@ python3 scripts/check-states.py
 
 The installer tests run in disposable directories inside this checkout with mocked downloads and desktop registration. They do not change HOME or PATH, install software, or alter your desktop settings. Native state checks materialize editing, assistant, rewriting, attachment preview, sending, offline, sent, no-results, and dismissed views. `check` verifies loading and materialization; inspect layout and interactions in a real window as well.
 
-The installer workflow builds and validates the actual `.app` on Apple Silicon and Intel macOS runners, including reinstallation, AppleScript compilation, bundle signing, and native runtime checks. Local installer tests mock macOS system tools; they do not replace these platform checks.
+The installer workflow builds and validates the actual `.app` on Apple Silicon and Intel macOS runners, including reinstallation, AppleScript compilation, Folio icon conversion, bundle signing, and native runtime checks. Local installer tests mock macOS system tools; they do not replace these platform checks.
+
+The macOS bundle uses the Folio document icon at standard and Retina resolutions. To regenerate its committed PNG icon set after editing `forma/assets/app-icon.svg`, run `python3 scripts/build-icon.py` with `rsvg-convert` installed. End users do not need this tool.

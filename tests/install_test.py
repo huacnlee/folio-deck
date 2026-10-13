@@ -3,6 +3,7 @@ import hashlib
 import io
 import plistlib
 import shutil
+import struct
 from pathlib import Path
 import subprocess
 import tarfile
@@ -36,6 +37,8 @@ class InstallTest(unittest.TestCase):
             (self.source / file).write_text('sample')
         (self.source / 'forma').mkdir()
         (self.source / 'forma/icon.svg').write_text('<svg/>')
+        (self.source / 'forma/assets').mkdir()
+        shutil.copytree(ROOT / 'forma/assets/FolioDesk.iconset', self.source / 'forma/assets/FolioDesk.iconset')
         self.write_executable(self.fake / 'curl', '#!/bin/sh\nexit 1\n')
         self.write_executable(self.fake / 'uname', '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n')
         self.write_executable(self.fake / 'xdg-mime', '#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.root / 'mime-call') + '"\n')
@@ -131,8 +134,19 @@ bundle = pathlib.Path(sys.argv[2])
 (bundle / 'Contents/MacOS/applet').write_text('mock native AppleScript executable')
 (bundle / 'Contents/MacOS/applet').chmod(0o755)
 with (bundle / 'Contents/Info.plist').open('wb') as handle:
-    plistlib.dump({'CFBundleIdentifier': 'com.apple.ScriptEditor.id', 'CFBundleExecutable': 'applet', 'CFBundlePackageType': 'APPL'}, handle)
+    plistlib.dump({'CFBundleIdentifier': 'com.apple.ScriptEditor.id', 'CFBundleExecutable': 'applet', 'CFBundlePackageType': 'APPL', 'CFBundleIconFile': 'applet', 'CFBundleIconName': 'applet'}, handle)
+(bundle / 'Contents/Resources/Assets.car').write_text('default AppleScript icon catalog')
 shutil.copyfile(sys.argv[3], bundle / 'Contents/Resources/Scripts/main.scpt')
+''')
+        self.write_executable(self.fake / 'iconutil', '''#!/usr/bin/env python3
+import pathlib, struct, sys
+source = pathlib.Path(sys.argv[3])
+output = pathlib.Path(sys.argv[5])
+payload = b''
+for image in sorted(source.glob('*.png')):
+    png = image.read_bytes()
+    payload += b'ic10' + struct.pack('>I', len(png) + 8) + png
+output.write_bytes(b'icns' + struct.pack('>I', len(payload) + 8) + payload)
 ''')
         self.write_executable(self.fake / 'PlistBuddy', '''#!/usr/bin/env python3
 import pathlib, plistlib, sys
@@ -184,14 +198,22 @@ seal.write_text(json.dumps(files))
         self.write_executable(self.fake / 'lsregister', f'#!/bin/sh\nprintf "%s\\n" "$@" > "{self.root / "registered-app"}"\n')
         self.write_executable(self.fake / 'open', '#!/bin/sh\nprintf "%s\\n" "$@"\n')
         source = self.script.read_text()
-        source = source.replace('for utility in osacompile codesign;', f'for utility in "{self.fake / "osacompile"}" "{self.fake / "codesign"}";')
-        for name in ['osacompile', 'codesign']:
+        source = source.replace('for utility in osacompile codesign iconutil;', f'for utility in "{self.fake / "osacompile"}" "{self.fake / "codesign"}" "{self.fake / "iconutil"}";')
+        for name in ['osacompile', 'codesign', 'iconutil']:
             source = source.replace('  ' + name + ' ', '  "' + str(self.fake / name) + '" ')
         source = source.replace('/usr/libexec/PlistBuddy', '"' + str(self.fake / 'PlistBuddy') + '"')
         source = source.replace('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '"' + str(self.fake / 'lsregister') + '"')
         source = source.replace('/usr/bin/open', '"' + str(self.fake / 'open') + '"')
         self.script.write_text(source)
         return self.root / 'Applications/Folio Desk.app'
+
+    def test_app_icon_has_all_standard_and_retina_sizes(self):
+        for size in (16, 32, 128, 256, 512):
+            for scale in (1, 2):
+                name = f'icon_{size}x{size}' + ('@2x' if scale == 2 else '') + '.png'
+                png = (ROOT / 'forma/assets/FolioDesk.iconset' / name).read_bytes()
+                self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
+                self.assertEqual(struct.unpack('>II', png[16:24]), (size * scale, size * scale))
 
     def test_macos_bundle_contains_runtime_resources_and_existing_plist_keys(self):
         bundle = self.configure_macos()
@@ -201,6 +223,10 @@ seal.write_text(json.dumps(files))
             plist = plistlib.load(handle)
         self.assertEqual(plist['CFBundleIdentifier'], 'com.folio.desk')
         self.assertEqual(plist['CFBundleExecutable'], 'applet')
+        self.assertEqual(plist['CFBundleIconFile'], 'FolioDesk.icns')
+        self.assertNotIn('CFBundleIconName', plist)
+        self.assertFalse((bundle / 'Contents/Resources/Assets.car').exists())
+        self.assertEqual((bundle / 'Contents/Resources/FolioDesk.icns').read_bytes()[:4], b'icns')
         self.assertEqual(plist['CFBundleURLTypes'][0]['CFBundleURLSchemes'], ['folio-mail'])
         self.assertEqual((bundle / 'Contents/MacOS/gpui-shell').read_bytes(), RUNTIME)
         self.assertTrue((bundle / 'Contents/Resources/app/main.js').is_file())

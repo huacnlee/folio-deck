@@ -37,6 +37,11 @@ jobs:
           test -x ~/Applications/"Folio Desk.app"/Contents/MacOS/applet
           test -x ~/Applications/"Folio Desk.app"/Contents/MacOS/gpui-shell
           test -f ~/Applications/"Folio Desk.app"/Contents/Resources/app/main.js
+          test -s ~/Applications/"Folio Desk.app"/Contents/Resources/FolioDesk.icns
+          test ! -f ~/Applications/"Folio Desk.app"/Contents/Resources/Assets.car
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' ~/Applications/"Folio Desk.app"/Contents/Info.plist)" = FolioDesk.icns
+          iconutil -c iconset ~/Applications/"Folio Desk.app"/Contents/Resources/FolioDesk.icns -o tests/installed.iconset
+          test -f tests/installed.iconset/icon_512x512@2x.png
           plutil -lint ~/Applications/"Folio Desk.app"/Contents/Info.plist
           codesign --verify --deep --strict ~/Applications/"Folio Desk.app"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ~/Applications/"Folio Desk.app"/Contents/Info.plist
