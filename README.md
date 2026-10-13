@@ -59,13 +59,13 @@ Time and tokens come from the agents' local transcripts (see [Measuring](#measur
     </tr>
     <tr>
       <td><a href="apps/folio-deck">folio-deck</a>&nbsp;(phase&nbsp;2)</td>
-      <td>—</td>
+      <td>unknown&nbsp;(no&nbsp;local&nbsp;transcript)</td>
+      <td align="right">≈515&nbsp;min*</td>
       <td align="right">—</td>
       <td align="right">—</td>
       <td align="right">—</td>
       <td align="right">—</td>
-      <td align="right">—</td>
-      <td>Not&nbsp;recorded</td>
+      <td>Done,&nbsp;tokens&nbsp;unknown</td>
     </tr>
     <tr>
       <td><a href="apps/tendra">tendra</a></td>
@@ -134,7 +134,7 @@ Time and tokens come from the agents' local transcripts (see [Measuring](#measur
 
 Notes:
 
-- **folio-deck** phase 1 is the Codex session before commit `59c1cc1` (2026-10-13 09:52): it started at 00:07 and paused overnight, hence the gap between wall and active time. Phase 2 (Gmail, local cache, installer and macOS bundle, commits `4cb5fb2` to `ea51ddc`, 10:20–18:55) has no transcript on this machine yet; update the row with the same script once it is found.
+- **folio-deck** phase 1 is the Codex session before commit `59c1cc1` (2026-10-13 09:52): it started at 00:07 and paused overnight, hence the gap between wall and active time. Phase 2 (Gmail, local cache, installer and macOS bundle) has no transcript in any local Codex (current or archived), Claude Code or other agent session store, so its tokens cannot be counted. *Its wall time is taken from commits instead: from `6a98b83` at 10:20 to `ea51ddc` at 18:55. Replace the row with `session-stats.py` output if the transcript turns up.
 - **tendra** was a standalone repository, [huacnlee/tendra](https://github.com/huacnlee/tendra), imported unchanged. Its session includes about 50 minutes of wrap-up and context compaction after the last commit.
 - **ocean-view**, **signed** and **skills-manager** were built in parallel by three subagents of one Claude Code session, each measured from its own transcript (`<session>/subagents/agent-*.jsonl`). Subagents inherit the parent's context, which is included in their cache reads. Prompts count the requirements relayed by the parent plus the messages sent straight to the subagent (19 for signed, 4 for ocean-view). ocean-view ran in two rounds: the first build, then map dragging, zooming, click and layout fixes.
 - Fixes made afterwards in the parent session (for example the `TextEncoder` crash in signed) are not included.
