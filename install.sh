@@ -194,10 +194,11 @@ APPLESCRIPT
   /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLName string Folio Desk' "$plist"
   /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes array' "$plist"
   /usr/libexec/PlistBuddy -c 'Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string folio-mail' "$plist"
-  # Re-sign the assembled bundle after changing its resources and metadata.
+  # check generates declarations/editor config inside the app. Finish those
+  # writes before sealing the resources with the bundle signature.
+  "$bundle/Contents/MacOS/gpui-shell" check -d "$bundle/Contents/Resources/app"
   codesign --force --deep --sign - "$bundle"
   codesign --verify --deep --strict "$bundle"
-  "$bundle/Contents/MacOS/gpui-shell" check -d "$bundle/Contents/Resources/app"
   destination="$applications_dir/Folio Desk.app"
   if [ -L "$destination" ]; then
     echo "Refusing to replace the linked application: $destination" >&2

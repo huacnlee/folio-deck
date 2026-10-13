@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = b'''#!/bin/sh
 case "$1" in
   --version) echo 'gpui-shell 0.7.3' ;;
-  check) test -f "$3/main.js" && ! test -f "$3/reject" ;;
+  check) test -f "$3/main.js" && ! test -f "$3/reject" || exit 1
+    printf 'generated declarations\\n' > "$3/gpui-kit.d.ts" ;;
   run) printf '%s\\n' "$@" ;;
   *) exit 1 ;;
 esac
@@ -79,7 +80,7 @@ class InstallTest(unittest.TestCase):
     def test_invalid_app_keeps_existing_installation(self):
         self.assertEqual(self.run_installer().returncode, 0)
         (self.app / 'main.js').write_text('previous working app')
-        self.write_executable(self.bin / 'gpui-shell', RUNTIME.replace(b'test -f "$3/main.js" && ! test -f "$3/reject"', b'exit 1'))
+        self.write_executable(self.bin / 'gpui-shell', RUNTIME.replace(b'check) test -f', b'check) exit 1; test -f'))
         self.assertNotEqual(self.run_installer().returncode, 0)
         self.assertEqual((self.app / 'main.js').read_text(), 'previous working app')
 
@@ -166,9 +167,19 @@ try:
 except (KeyError, IndexError):
     sys.exit(1)
 ''')
-        self.write_executable(self.fake / 'codesign', f'''#!/bin/sh
-printf '%s\\n' "$@" >> "{self.root / 'sign-calls'}"
-test ! -f "{self.root / 'sign-fail'}"
+        self.write_executable(self.fake / 'codesign', f'''#!/usr/bin/env python3
+import hashlib, json, pathlib, sys
+root = pathlib.Path({str(self.root)!r})
+with (root / 'sign-calls').open('a') as handle:
+    handle.write(' '.join(sys.argv[1:]) + '\\n')
+if (root / 'sign-fail').exists(): sys.exit(1)
+bundle = pathlib.Path(sys.argv[-1])
+seal = bundle / 'Contents/_CodeSignature/mock-seal.json'
+files = {{str(p.relative_to(bundle)): hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle.rglob('*') if p.is_file() and '_CodeSignature' not in p.parts}}
+if '--verify' in sys.argv:
+    sys.exit(0 if json.loads(seal.read_text()) == files else 1)
+seal.parent.mkdir(exist_ok=True)
+seal.write_text(json.dumps(files))
 ''')
         self.write_executable(self.fake / 'lsregister', f'#!/bin/sh\nprintf "%s\\n" "$@" > "{self.root / "registered-app"}"\n')
         self.write_executable(self.fake / 'open', '#!/bin/sh\nprintf "%s\\n" "$@"\n')

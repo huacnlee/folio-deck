@@ -13,7 +13,7 @@ jobs:
   installer-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check shell syntax and installer behavior
         run: |
           sh -n install.sh
@@ -27,7 +27,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install and upgrade the complete application
         run: |
           sh install.sh --app-source .
@@ -42,3 +42,4 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ~/Applications/"Folio Desk.app"/Contents/Info.plist
           /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' ~/Applications/"Folio Desk.app"/Contents/Info.plist
           ~/Applications/"Folio Desk.app"/Contents/MacOS/gpui-shell check -d ~/Applications/"Folio Desk.app"/Contents/Resources/app
+          codesign --verify --deep --strict ~/Applications/"Folio Desk.app"
