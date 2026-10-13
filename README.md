@@ -1,8 +1,10 @@
-# Folio Desk
+# Mail example by gpui-shell
 
 A desktop mail interface demo built with [gpui-shell](https://gpui-kit.com/shell/) and [GPUI Kit](https://github.com/huacnlee/gpui-kit).
 
 A pale paper palette, geometric avatars, and eight sample conversations. Built entirely with native GPUI elements in JavaScript.
+
+<img width="1198" height="827" alt="image" src="https://github.com/user-attachments/assets/f95e7983-a61d-4252-a811-440e4d8cbec8" />
 
 ## Install gpui-shell
 
