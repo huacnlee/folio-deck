@@ -20,8 +20,8 @@ async function moduleAt(path) {
   modules.set(path, module);
   await module.link(async specifier => {
     if (specifier.startsWith('./')) return moduleAt('../' + specifier.slice(2));
-    const exports = specifier === 'process' ? { default: { run() {} } } : specifier === 'buffer' ? { Buffer } : specifier === 'crypto' ? { createHash, randomBytes } : specifier === 'gpui-kit' ? { View: class {}, div() {}, image() {}, svg() {} }
-      : specifier === 'gpui-base' ? { h_flex() {}, v_flex() {}, h_resizable() {}, resizable_panel() {}, set_theme() {} }
+    const exports = specifier === 'process' ? { default: { run() {} } } : specifier === 'buffer' ? { Buffer } : specifier === 'crypto' ? { createHash, randomBytes } : specifier === 'gpui-kit' ? { View: class {}, div() {}, image() {}, svg() {}, PathBuilder: {} }
+      : specifier === 'gpui-base' ? { h_flex() {}, v_flex() {}, h_resizable() {}, resizable_panel() {}, set_theme() {}, TextView: {} }
         : Object.fromEntries(['Button', 'TitleBar', 'InputState', 'TextareaState', 'InputGroup', 'InputGroupInput', 'InputGroupTextarea'].map(name => [name, () => {}]));
     return new vm.SyntheticModule(Object.keys(exports), function () {
       for (const [name, value] of Object.entries(exports)) this.setExport(name, value);

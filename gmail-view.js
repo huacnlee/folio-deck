@@ -1,15 +1,23 @@
-import { View, div, svg, image } from 'gpui-kit';
-import { h_flex, v_flex, h_resizable, resizable_panel } from 'gpui-base';
+import { View, div, svg, image, PathBuilder } from 'gpui-kit';
+import { h_flex, v_flex, h_resizable, resizable_panel, TextView } from 'gpui-base';
 import { Button, InputState, TextareaState, InputGroup, InputGroupInput, InputGroupTextarea } from 'gpui-component';
 import { CallbackListener } from './oauth-callback.js';
-import { GmailClient, beginAuthorization, mailboxAddress, buildRawMessage } from './gmail.js';
+import { avatarFor } from './avatar.js';
+import { GmailClient, beginAuthorization, mailboxAddress, buildRawMessage, textHtml } from './gmail.js';
 
 const component = (Type, ...args) => typeof Type.new === 'function' ? Type.new(...args) : new Type(...args);
 const icon = (name, size = 16) => svg(`forma/assets/${name}.svg`).size(size).flex_shrink_0();
 const text = (value, cx, size = 13, muted = false) => div().text_size(size).text_color(muted ? cx.theme().colors.muted_foreground : cx.theme().colors.foreground).child(value);
-const avatarNames = ['maya', 'clara', 'noah', 'leo2'];
-const avatarName = sender => avatarNames[Array.from(sender || '').reduce((hash, char) => hash + char.charCodeAt(0), 0) % avatarNames.length];
-const photo = (sender, size) => image(`forma/assets/${avatarName(sender)}.svg`).size(size).rounded(8).flex_shrink_0();
+const pct = value => `${Math.round(value / 64 * 10000) / 100}%`;
+const avatarPath = (layer, size) => layer.ops.reduce((path, [op, ...args]) =>
+  op === 'M' ? path.move_to(pct(args[0]), pct(args[1])) : op === 'L' ? path.line_to(pct(args[0]), pct(args[1]))
+    : op === 'A' ? path.arc_to(pct(args[0]), pct(args[0]), 0, false, args[3], pct(args[1]), pct(args[2])) : path.close(),
+  layer.width ? PathBuilder.stroke(layer.width * size / 64) : PathBuilder.fill()).build();
+const photo = (sender, size) => {
+  const avatar = avatarFor(sender);
+  return div().relative().size(size).flex_shrink_0().rounded(size * 15 / 64).overflow_hidden().bg(avatar.ground)
+    .children(avatar.layers.map(layer => window.paint_path(avatarPath(layer, size), layer.color).absolute().inset_0()));
+};
 const domain = address => mailboxAddress(address).split('@')[1] || '';
 const folders = [['INBOX', 'Inbox'], ['UNREAD', 'Unread'], ['STARRED', 'Starred'], ['SENT', 'Sent'], ['DRAFT', 'Drafts'], ['', 'All mail'], ['TRASH', 'Trash']];
 const dateLabel = value => {
@@ -97,7 +105,11 @@ export default class GmailView extends View {
     const revision = ++this.listRevision;
     const clientRevision = this.client.revision;
     const folder = this.folder, query = this.query, pageToken = append ? this.nextPageToken : '';
-    this.loading = true; this.error = ''; cx.notify();
+    this.loading = true; this.error = '';
+    // Show the saved copy of this listing at once; Gmail then confirms it.
+    const cached = append || this.messages.length ? null : this.client.cached({ folder, query });
+    if (cached) { this.messages = cached.messages; this.nextPageToken = cached.nextPageToken; this.status = 'Showing saved letters · Refreshing'; }
+    cx.notify();
     try {
       const page = await this.client.list({ folder, query, pageToken });
       if (revision !== this.listRevision || clientRevision !== this.client.revision) return;
@@ -286,7 +298,7 @@ export default class GmailView extends View {
           .child(text(this.connecting ? 'Connecting your mailbox…' : 'Complete sign-in in your browser.', cx, 13).font_medium())
           .child(text('Folio receives Google’s callback automatically. Return here after granting access.', cx, 12, true).line_height('20px'))
           .child(this.button('cancel-google-login', 'Cancel sign-in', cx, cx => this.cancelLogin(cx), this.connecting))))
-        .child(text('Remembered refresh tokens are stored in this app’s local data file. Access tokens stay in memory. No mail or tokens are sent to a Folio server.', cx, 11, true).line_height('18px'))
+        .child(text('Remembered accounts keep their refresh token and a cache of recent letters in this app’s local data file; disconnecting erases both. Access tokens stay in memory. No mail or tokens are sent to a Folio server.', cx, 11, true).line_height('18px'))
         .when(this.client.session, el => el.child(this.button('cancel-setup', 'Back to mail', cx, cx => this.close(cx), this.connecting)))
         .when(this.error, el => el.child(text(this.error, cx, 13))));
   }
@@ -424,7 +436,11 @@ export default class GmailView extends View {
             .child(this.addressRow('To',message.to,this.client.session.email,cx))
             .child(v_flex().p_6()
               .child(text(message.subject,cx,16).font_semibold().mb_5())
-              .child(text(message.body || 'This letter has no readable text body.',cx,14).line_height('23px'))
+              .child(message.html || message.body
+                ? TextView.html(`gmail-body-${message.id}`, message.html || textHtml(message.body)).selectable(true).w_full().min_w_0()
+                  .text_size(14).line_height('23px').text_color(cx.theme().colors.foreground)
+                  .on_link_click((url, cx) => { if (/^(https?:|mailto:)/i.test(url)) cx.open_url(url); })
+                : text('This letter has no readable text body.',cx,14,true))
               .when(message.attachments.length,el => el.child(v_flex().gap_3().mt_4().children(message.attachments.map(attachment =>
                 h_flex().gap_2().child(icon('attach',14)).child(text(attachment.name,cx,12).flex_1().min_w_0().truncate())
                   .child(text(`· ${Math.ceil(attachment.size / 1024)} KB`,cx,11,true))))))

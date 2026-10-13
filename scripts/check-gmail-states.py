@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix='.native-gmail-', dir=root / 'tests') as
     app = Path(directory)
     shutil.copytree(root / 'forma', app / 'forma')
     shutil.copyfile(root / 'gmail-view.js', app / 'view.js')
-    for file in ['gmail.js', 'oauth-callback.js', 'oauth-runtime.js']:
+    for file in ['gmail.js', 'avatar.js', 'oauth-callback.js', 'oauth-runtime.js']:
         shutil.copyfile(root / file, app / file)
     manifest = json.loads((root / 'gpui-shell.json').read_text())
     manifest.update(id='com.folio.gmail-check', entry='main.js')

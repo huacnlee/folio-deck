@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { GmailClient, SCOPES, REDIRECT_URI, SESSION_KEY, parseCredentials, beginAuthorization, callbackCode, parseMessage, decodeHeader, htmlToText, buildRawMessage } from '../gmail.js';
+import { avatarFor, avatarPalettes } from '../avatar.js';
+import { GmailClient, MailCache, CACHE_PREFIX, SCOPES, REDIRECT_URI, SESSION_KEY, parseCredentials, beginAuthorization, callbackCode, parseMessage, decodeHeader, htmlToText, emailHtml, textHtml, keepLineBreaks, buildRawMessage } from '../gmail.js';
 
 const credentials = { installed: { client_id: '123456-test.apps.googleusercontent.com', client_secret: 'test-client-secret' } };
 const session = { clientId: credentials.installed.client_id, clientSecret: credentials.installed.client_secret, refreshToken: 'test-refresh', email: 'me@example.test' };
@@ -50,6 +51,33 @@ test('MIME parsing decodes international headers, plain alternatives and attachm
   assert.equal(htmlToText('<style>hidden</style><script>unsafe()</script><p>Hello<br>world<img src="https://tracker.example"></p>'), 'Hello\nworld[Image]');
   const htmlOnly = { payload: { mimeType: 'text/html', body: { data: b64('<p>Only HTML</p>') } } };
   assert.equal(parseMessage(htmlOnly).body, 'Only HTML');
+  assert.equal(parseMessage(htmlOnly).html, '<p>Only HTML</p>');
+  assert.equal(parsed.html, '<p>HTML alternative</p>', 'the HTML part is shown when a letter has one');
+});
+
+test('letter HTML is reduced to what TextView renders, without trackers or hidden text', () => {
+  const html = emailHtml(`<!DOCTYPE html><html><head><title>t</title><style>p{color:red}</style></head><body bgcolor="#fff">
+    <span style="display:none;max-height:0">Preheader you should not see</span>
+    <p style="color:red" onclick="steal()" class="x">Hello <b>there</b></p>
+    <img src="https://tracker.example/open.gif" width="1"><img src="https://cdn.example/logo.png" alt="Acme">
+    <script>alert(1)</script><a href="javascript:alert(1)">bad</a> <a href="https://example.test/a?b=1&amp;c=2">ok</a>
+    <form action="https://evil.example"><input name="password"></form></body></html>`);
+  for (const gone of ['Preheader', 'style', 'onclick', 'class=', 'tracker.example', '<img', '<script', 'javascript:', 'password', '<title', 'bgcolor'])
+    assert.ok(!html.includes(gone), `${gone} remains in ${html}`);
+  assert.match(html, /<p>Hello <b>there<\/b><\/p>/);
+  assert.match(html, /\[Acme\]/);
+  assert.match(html, /<a>bad<\/a>/);
+  assert.match(html, /<a href="https:\/\/example.test\/a\?b=1&amp;c=2">ok<\/a>/);
+
+  assert.equal(textHtml('Hi <you> & me\nnext line\n\nView: https://github.com/a/b/runs/1.\n\nJobs:\n  * one failed\n  * two failed'),
+    '<pre>Hi &lt;you&gt; &amp; me\nnext line</pre><p>View: <a href="https://github.com/a/b/runs/1">https://github.com/a/b/runs/1</a>.</p><pre>Jobs:\n  * one failed\n  * two failed</pre>');
+
+  // TextView drops <br> inside paragraphs: innermost blocks carry lines in <pre>.
+  assert.equal(keepLineBreaks('<div class="x"><p>Repository: <b>a/b</b><br>\n   Workflow: CI<br><br></p><p>Plain</p></div>'),
+    '<div class="x"><pre>Repository: <b>a/b</b>\nWorkflow: CI</pre><p>Plain</p></div>');
+  assert.equal(keepLineBreaks('<table><tr><td width="9">K1<br>K2</td></tr></table>'), '<table><tr><td width="9">K1 K2</td></tr></table>');
+  assert.equal(keepLineBreaks('<ul><li>G1<br>G2</li></ul>'), '<ul><li>G1<br>G2</li></ul>', 'lists already break lines');
+  assert.match(emailHtml('<p>A<br>B</p>'), /<pre>A\nB<\/pre>/);
 });
 
 test('outgoing MIME is UTF-8 base64url and preserves reply threading without header injection', () => {
@@ -137,4 +165,91 @@ test('sign-in commits only after scopes/profile verification; disconnect blocks 
   await assert.rejects(refresh, error => error.code === 'reconnect');
   assert.equal(client.session, null);
   assert.equal(storage.getItem(SESSION_KEY), null);
+});
+
+test('lists reuse cached metadata, apply Gmail history and show saved listings at once', async () => {
+  const storage = store(session);
+  const urls = [];
+  let history = { historyId: '200' };
+  const fetch = async url => {
+    urls.push(url);
+    if (url.endsWith('/token')) return response({ access_token: 'access', expires_in: 3600 });
+    const path = new URL(url).pathname;
+    if (path.endsWith('/profile')) return response({ emailAddress: session.email, historyId: '100' });
+    if (path.endsWith('/history')) return response(history);
+    if (path.endsWith('/modify')) return response({ id: 'abc', labelIds: ['INBOX'] });
+    if (path.endsWith('/messages')) return response({ messages: [{ id: 'abc' }, { id: '123' }] });
+    return response(apiMessage(path.split('/').at(-1), url.includes('format=full') ? 'full' : 'metadata'));
+  };
+  const first = await new GmailClient({ storage, fetch }).list();
+  assert.equal(first.messages.length, 2);
+  assert.equal(urls.filter(url => url.includes('format=metadata')).length, 2);
+
+  // A new process starts from the saved index and only asks Gmail what changed.
+  urls.length = 0;
+  history = { historyId: '300', history: [{ labelsRemoved: [{ message: { id: 'abc', labelIds: ['INBOX'] }, labelIds: ['UNREAD'] }] }, { messagesDeleted: [{ message: { id: '123' } }] }] };
+  const client = new GmailClient({ storage, fetch });
+  assert.deepEqual(client.cached().messages.map(m => m.id), ['abc', '123']);
+  const second = await client.list();
+  assert.equal(urls.filter(url => url.includes('format=metadata')).length, 1, 'only the deleted-then-listed id is fetched again');
+  assert.equal(second.messages.find(m => m.id === 'abc').unread, false);
+  assert.equal(JSON.parse(storage.getItem(`${CACHE_PREFIX}:${session.email}`)).historyId, '300');
+
+  // Bodies are read once, then served from storage with current labels.
+  const opened = await client.read('abc');
+  urls.length = 0;
+  const again = await client.read('abc');
+  assert.deepEqual(again, opened); assert.equal(urls.length, 0);
+  await client.modify('abc', [], ['UNREAD']);
+  assert.equal((await client.read('abc')).unread, false, 'mutations write their returned labels into the cache');
+
+  // An expired history baseline drops cached metadata instead of trusting it.
+  history = null;
+  client.fetch = async url => new URL(url).pathname.endsWith('/history') ? response({}, 404) : fetch(url);
+  urls.length = 0;
+  await client.list();
+  assert.equal(urls.filter(url => url.includes('format=metadata')).length, 2);
+
+  client.disconnect();
+  assert.equal(storage.getItem(`${CACHE_PREFIX}:${session.email}`), null);
+  assert.equal(storage.getItem(`${CACHE_PREFIX}:${session.email}:body:abc`), null);
+});
+
+test('mail cache filters stale folder rows, bounds bodies and stays in memory when not remembered', () => {
+  const storage = store();
+  const cache = new MailCache(storage, 'me@example.test');
+  cache.historyId = '1';
+  const message = parseMessage(apiMessage('abc', 'full'));
+  cache.putMeta(message); cache.putList('INBOX', '', ['abc'], '', 1);
+  assert.equal(cache.list('INBOX', '').messages.length, 1);
+  cache.setLabels('abc', ['UNREAD']);
+  assert.equal(cache.list('INBOX', '').messages.length, 0, 'archived letters leave the cached inbox');
+  for (let i = 0; i < 70; i++) cache.putBody({ ...message, id: `m${i}` });
+  cache.save();
+  assert.equal(cache.bodies.length, 60);
+  assert.equal(storage.getItem(`${cache.key}:body:m0`), null);
+  cache.putBody({ ...message, id: 'huge', body: 'x'.repeat(300 * 1024) });
+  assert.equal(cache.body('huge'), null);
+
+  const disk = store({ ...session, remember: true });
+  const client = new GmailClient({ storage: disk });
+  client.session.remember = false;
+  client.cache().putList('INBOX', '', [], '', 1); client.cache().save();
+  assert.equal(disk.getItem(`${CACHE_PREFIX}:${session.email}`), null);
+});
+
+test('avatars are generated from the email address in the Folio tile style', () => {
+  assert.deepEqual(avatarFor('Clara <Clara@Example.test>'), avatarFor('Someone else <clara@example.test>'), 'one address, one tile');
+  assert.deepEqual(avatarFor('clara@example.test'), avatarFor('Clara <clara@example.test>'));
+  const tiles = Array.from({ length: 400 }, (_, i) => avatarFor(`person${i}@example.test`));
+  for (const tile of tiles) for (const layer of tile.layers) for (const op of layer.ops) {
+    assert.ok(avatarPalettes.flat().includes(layer.color));
+    for (const value of op.slice(1).filter(value => typeof value === 'number')) assert.ok(value >= 0 && value <= 64, `${value} leaves the tile`);
+  }
+  assert.equal(new Set(tiles.map(tile => tile.ground)).size, avatarPalettes.length, 'every palette is used');
+  assert.equal(new Set(tiles.map(tile => tile.motif)).size, 7, 'every motif is used');
+  // ~14,000 combinations: a hash cannot promise uniqueness, but repeats stay rare.
+  assert.ok(new Set(tiles.map(tile => JSON.stringify(tile))).size >= 385, 'repeats stay rare across 400 addresses');
+  const inbox = ['notifications@github.com', 'no-reply@accounts.google.com', 'sunli@example.com', 'clara@example.test', 'owen@stillhouse.example', 'nina@softassembly.example'];
+  assert.equal(new Set(inbox.map(address => JSON.stringify(avatarFor(address)))).size, inbox.length);
 });

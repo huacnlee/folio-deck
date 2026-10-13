@@ -85,7 +85,7 @@ fi
 mkdir "$stage/app"
 if [ -n "$app_source" ]; then
   # Copy only application assets; exclude Git history and unrelated local files.
-  cp "$app_source/main.js" "$app_source/mailbox.js" "$app_source/theme.js" "$app_source/gmail.js" "$app_source/gmail-view.js" "$app_source/oauth-callback.js" "$app_source/oauth-runtime.js" "$app_source/gpui-shell.json" "$stage/app/"
+  cp "$app_source/main.js" "$app_source/mailbox.js" "$app_source/theme.js" "$app_source/gmail.js" "$app_source/gmail-view.js" "$app_source/avatar.js" "$app_source/oauth-callback.js" "$app_source/oauth-runtime.js" "$app_source/gpui-shell.json" "$stage/app/"
   cp -R "$app_source/forma" "$stage/app/"
 else
   echo 'Downloading Folio Desk…'
@@ -93,7 +93,7 @@ else
     https://codeload.github.com/huacnlee/folio-deck/tar.gz/refs/heads/main -o "$stage/mail.tar.gz"
   mkdir "$stage/source"
   tar -xzf "$stage/mail.tar.gz" -C "$stage/source" --strip-components=1
-  for file in main.js mailbox.js theme.js gmail.js gmail-view.js oauth-callback.js oauth-runtime.js gpui-shell.json; do
+  for file in main.js mailbox.js theme.js gmail.js gmail-view.js avatar.js oauth-callback.js oauth-runtime.js gpui-shell.json; do
     cp "$stage/source/$file" "$stage/app/"
   done
   cp -R "$stage/source/forma" "$stage/app/"

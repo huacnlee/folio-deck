@@ -13,7 +13,7 @@ module = ast.parse((root / 'scripts/check-gmail-states.py').read_text())
 message = next(ast.literal_eval(n.value) for n in module.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'message' for t in n.targets))
 with tempfile.TemporaryDirectory(prefix='.native-visual-', dir=root / 'tests') as directory:
     app = Path(directory)
-    for name in ['gmail-view.js', 'gmail.js', 'oauth-callback.js', 'oauth-runtime.js', 'theme.js']:
+    for name in ['gmail-view.js', 'gmail.js', 'avatar.js', 'oauth-callback.js', 'oauth-runtime.js', 'theme.js']:
         shutil.copyfile(root / name, app / name)
     shutil.copytree(root / 'forma', app / 'forma')
     manifest = json.loads((root / 'gpui-shell.json').read_text())

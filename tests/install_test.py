@@ -34,7 +34,7 @@ class InstallTest(unittest.TestCase):
         self.fake.mkdir()
         self.source = self.root / 'source'
         self.source.mkdir()
-        for file in ['main.js', 'mailbox.js', 'theme.js', 'gmail.js', 'gmail-view.js', 'oauth-callback.js', 'oauth-runtime.js', 'gpui-shell.json']:
+        for file in ['main.js', 'mailbox.js', 'theme.js', 'gmail.js', 'gmail-view.js', 'avatar.js', 'oauth-callback.js', 'oauth-runtime.js', 'gpui-shell.json']:
             (self.source / file).write_text('sample')
         (self.source / 'gpui-shell.json').write_text((ROOT / 'gpui-shell.json').read_text())
         (self.source / 'forma').mkdir()

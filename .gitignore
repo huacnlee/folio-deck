@@ -1,6 +1,6 @@
 gpui-kit.d.ts
 .DS_Store
-
+dist/
 tests/*-preview.png
 tests/.installer-*
 tests/.native-*

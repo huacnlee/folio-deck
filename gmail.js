@@ -60,6 +60,87 @@ function errorFor(status, payload) {
   return new GmailError('Google could not complete this request. Check your OAuth client and try again.');
 }
 
+export const CACHE_PREFIX = 'folio-gmail-cache-v1';
+const CACHE_LISTS = 24, CACHE_BODIES = 60, CACHE_BODY_CHARS = 256 * 1024;
+const memoryStorage = () => { const values = new Map(); return { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) }; };
+
+// Per-account mail cache. Metadata and labels stay trustworthy only while a
+// Gmail historyId baseline exists; bodies are immutable and keyed separately
+// so one letter never forces the whole index to be rewritten.
+export class MailCache {
+  constructor(storage, email) {
+    this.storage = storage;
+    this.key = `${CACHE_PREFIX}:${email}`;
+    let saved = null;
+    try { saved = JSON.parse(storage.getItem(this.key) || 'null'); } catch { /* A broken cache is rebuilt from Gmail. */ }
+    this.historyId = String(saved?.historyId || '');
+    this.lists = saved?.lists || {};
+    this.meta = saved?.meta || {};
+    this.bodies = Array.isArray(saved?.bodies) ? saved.bodies : [];
+  }
+
+  listKey(folder, query) { return `${folder}|${query}`; }
+  list(folder, query) {
+    const entry = this.lists[this.listKey(folder, query)];
+    if (!entry || !this.historyId) return null;
+    const messages = entry.ids.map(id => this.meta[id]).filter(m => m && (!folder || m.labels.includes(folder)));
+    return { messages, nextPageToken: entry.nextPageToken, at: entry.at };
+  }
+  putList(folder, query, ids, nextPageToken, now) { this.lists[this.listKey(folder, query)] = { ids, nextPageToken, at: now }; }
+  cachedMeta(id) { return this.historyId ? this.meta[id] : undefined; }
+  putMeta(message) {
+    const { body: _body, html: _html, attachments: _attachments, ...meta } = message;
+    this.meta[message.id] = meta;
+  }
+  setLabels(id, labels) {
+    const patch = m => m && Object.assign(m, { labels, unread: labels.includes('UNREAD'), starred: labels.includes('STARRED') });
+    patch(this.meta[id]);
+    const body = this.readBody(id);
+    if (body) { patch(body); this.writeBody(body); }
+  }
+  remove(id) {
+    delete this.meta[id];
+    if (this.bodies.includes(id)) { this.bodies = this.bodies.filter(other => other !== id); this.storage.removeItem(`${this.key}:body:${id}`); }
+  }
+  resetMeta() { this.meta = {}; this.lists = {}; this.historyId = ''; }
+
+  readBody(id) {
+    if (!this.bodies.includes(id)) return null;
+    try { return JSON.parse(this.storage.getItem(`${this.key}:body:${id}`) || 'null'); } catch { return null; }
+  }
+  body(id) {
+    const message = this.readBody(id);
+    if (!message) return null;
+    this.bodies = [id, ...this.bodies.filter(other => other !== id)];
+    const meta = this.cachedMeta(id);
+    return meta ? { ...message, labels: meta.labels, unread: meta.unread, starred: meta.starred } : message;
+  }
+  writeBody(message) {
+    try { this.storage.setItem(`${this.key}:body:${message.id}`, JSON.stringify(message)); return true; } catch { return false; }
+  }
+  putBody(message) {
+    if (String(message.body || '').length + String(message.html || '').length > CACHE_BODY_CHARS) return;
+    this.bodies = [message.id, ...this.bodies.filter(other => other !== message.id)];
+    if (!this.writeBody(message)) this.bodies.shift();
+  }
+
+  save() {
+    for (const id of this.bodies.slice(CACHE_BODIES)) this.storage.removeItem(`${this.key}:body:${id}`);
+    this.bodies = this.bodies.slice(0, CACHE_BODIES);
+    const lists = Object.entries(this.lists).sort(([, a], [, b]) => b.at - a.at).slice(0, CACHE_LISTS);
+    this.lists = Object.fromEntries(lists);
+    const kept = new Set([...lists.flatMap(([, entry]) => entry.ids), ...this.bodies]);
+    this.meta = Object.fromEntries(Object.entries(this.meta).filter(([id]) => kept.has(id)));
+    try { this.storage.setItem(this.key, JSON.stringify({ historyId: this.historyId, lists: this.lists, meta: this.meta, bodies: this.bodies })); }
+    catch { /* Storage is full: the cache stays in memory for this session. */ }
+  }
+  clear() {
+    for (const id of this.bodies) this.storage.removeItem(`${this.key}:body:${id}`);
+    this.storage.removeItem(this.key);
+    this.bodies = []; this.resetMeta();
+  }
+}
+
 export class GmailClient {
   constructor({ fetch: request = globalThis.fetch, storage = globalThis.localStorage, now = () => Date.now() } = {}) {
     this.fetch = request;
@@ -101,6 +182,7 @@ export class GmailClient {
     if (!profile.data.emailAddress?.includes('@')) throw new GmailError('Google did not return a mailbox address.', 'invalid_profile');
     if (revision !== this.revision) throw new GmailError('Sign-in was cancelled.', 'auth_cancelled');
     this.session = { ...temporary, email: profile.data.emailAddress };
+    this.mailCache = null;
     ++this.revision;
     this.refreshing = null;
     this.save();
@@ -140,27 +222,89 @@ export class GmailClient {
     return data;
   }
 
+  cache() {
+    const session = this.session;
+    if (!session) return null;
+    // A session that is not remembered must not leave mail on disk either.
+    if (this.mailCache?.email !== session.email) {
+      this.mailCache = new MailCache(session.remember ? this.storage : memoryStorage(), session.email);
+      this.mailCache.email = session.email;
+    }
+    return this.mailCache;
+  }
+  cached({ folder = 'INBOX', query = '' } = {}) { return this.cache()?.list(folder, query) || null; }
+
+  // Bring cached labels up to date through Gmail's history feed. Returns false
+  // when no baseline exists or Google expired it, so callers start a new one.
+  async sync(cache) {
+    if (!cache.historyId) return false;
+    const revision = this.revision;
+    let pageToken = '', latest = cache.historyId;
+    try {
+      do {
+        const page = await this.request('/history', { query: { startHistoryId: cache.historyId, maxResults: 500, ...(pageToken ? { pageToken } : {}) } });
+        if (revision !== this.revision) throw new GmailError('This account is no longer connected.', 'reconnect');
+        for (const entry of page.history || []) {
+          for (const { message } of entry.messagesDeleted || []) cache.remove(message.id);
+          for (const kind of ['labelsAdded', 'labelsRemoved']) for (const change of entry[kind] || []) {
+            const current = cache.meta[change.message.id];
+            if (!current) continue;
+            const labels = change.message.labelIds || (kind === 'labelsAdded' ? [...new Set([...current.labels, ...change.labelIds])] : current.labels.filter(label => !change.labelIds.includes(label)));
+            cache.setLabels(change.message.id, labels);
+          }
+        }
+        latest = String(page.historyId || latest);
+        pageToken = page.nextPageToken || '';
+      } while (pageToken);
+    } catch (error) {
+      if (error.code !== 'not_found') throw error;
+      cache.resetMeta();
+      return false;
+    }
+    cache.historyId = latest;
+    return true;
+  }
+
   profile() { return this.request('/profile'); }
   async list({ folder = 'INBOX', query = '', pageToken = '' } = {}) {
+    const cache = this.cache();
+    // Take the history baseline before reading metadata so no change is missed.
+    if (!(await this.sync(cache))) cache.historyId = String((await this.profile()).historyId || '');
     const page = await this.request('/messages', { query: { maxResults: 25, ...(folder ? { labelIds: folder } : {}), q: query, ...(pageToken ? { pageToken } : {}) } });
     const ids = (page.messages || []).map(m => m.id);
+    const missing = ids.filter(id => !cache.cachedMeta(id));
     // Keep small metadata requests bounded; no eager full-body downloads.
-    const messages = [];
-    for (let i = 0; i < ids.length; i += 5) {
-      const batch = await Promise.all(ids.slice(i, i + 5).map(id => this.request(`/messages/${id}`, { query: { format: 'metadata' } }).then(parseMessage)));
-      messages.push(...batch);
+    for (let i = 0; i < missing.length; i += 5) {
+      const batch = await Promise.all(missing.slice(i, i + 5).map(id => this.request(`/messages/${id}`, { query: { format: 'metadata' } }).then(parseMessage)));
+      batch.forEach(message => cache.putMeta(message));
     }
+    const messages = ids.map(id => cache.meta[id]).filter(Boolean).map(message => ({ ...message, body: '', html: '', attachments: [] }));
+    if (!pageToken) cache.putList(folder, query, ids, page.nextPageToken || '', this.now());
+    cache.save();
     return { messages, nextPageToken: page.nextPageToken || '', estimate: page.resultSizeEstimate || 0 };
   }
-  async read(id) { return parseMessage(await this.request(`/messages/${id}`, { query: { format: 'full' } })); }
-  modify(id, addLabelIds = [], removeLabelIds = []) { return this.request(`/messages/${id}/modify`, { method: 'POST', body: { addLabelIds, removeLabelIds } }); }
-  trash(id) { return this.request(`/messages/${id}/trash`, { method: 'POST', body: {} }); }
-  untrash(id) { return this.request(`/messages/${id}/untrash`, { method: 'POST', body: {} }); }
+  async read(id) {
+    const cache = this.cache();
+    const cached = cache?.body(id);
+    if (cached) return cached;
+    const message = parseMessage(await this.request(`/messages/${id}`, { query: { format: 'full' } }));
+    cache?.putMeta(message); cache?.putBody(message); cache?.save();
+    return message;
+  }
+  // Mutations answer with the message's new labels; mirror them into the cache.
+  async labelled(path, body = {}) {
+    const result = await this.request(path, { method: 'POST', body });
+    if (result?.id && Array.isArray(result.labelIds)) { const cache = this.cache(); cache?.setLabels(result.id, result.labelIds); cache?.save(); }
+    return result;
+  }
+  modify(id, addLabelIds = [], removeLabelIds = []) { return this.labelled(`/messages/${id}/modify`, { addLabelIds, removeLabelIds }); }
+  trash(id) { return this.labelled(`/messages/${id}/trash`); }
+  untrash(id) { return this.labelled(`/messages/${id}/untrash`); }
   send(fields) {
     const raw = buildRawMessage({ ...fields, from: this.session?.email });
     return this.request('/messages/send', { method: 'POST', body: { raw, ...(fields.threadId ? { threadId: fields.threadId } : {}) } });
   }
-  disconnect() { ++this.revision; this.session = null; this.refreshing = null; this.save(); }
+  disconnect() { this.cache()?.clear(); this.mailCache = null; ++this.revision; this.session = null; this.refreshing = null; this.save(); }
 }
 
 function decode64(value, charset = 'utf8') {
@@ -181,6 +325,49 @@ export function decodeHeader(value) {
 export function htmlToText(value) {
   return String(value || '').replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, '').replace(/<img\b[^>]*>/gi, '[Image]').replace(/<br\s*\/?\s*>/gi, '\n').replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n').replace(/<li[^>]*>/gi, '• ').replace(/<[^>]*>/g, '').replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&apos;|&#39;/gi, "'").replace(/&amp;/gi, '&').replace(/&#(\d+);/g, (_m, n) => String.fromCodePoint(Math.min(Number(n), 0x10ffff))).replace(/&#x([0-9a-f]+);/gi, (_m, n) => String.fromCodePoint(Math.min(parseInt(n, 16), 0x10ffff))).replace(/\n{3,}/g, '\n\n').trim();
 }
+const escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// TextView (gpui-base 0.7) drops <br> inside a paragraph and collapses
+// newlines everywhere but <pre>, where a <pre> without <code> renders as plain
+// wrapping text with links and emphasis intact. Carry each line break through
+// a <pre> in the innermost block that has one. (Inside <pre> TextView keeps
+// links but not bold or italic.)
+const LINE_BLOCKS = 'p|div|td|th|h[1-6]';
+const BLOCK_TAG = `<\\/?(?:${LINE_BLOCKS}|li|ul|ol|table|tr|tbody|thead|tfoot|blockquote|pre)\\b`;
+// Matches only innermost blocks: the body may not open or close another block.
+const INNERMOST = new RegExp(`<(${LINE_BLOCKS})\\b([^>]*)>((?:(?!${BLOCK_TAG})[\\s\\S])*?)<\\/\\1\\s*>`, 'gi');
+export function keepLineBreaks(html) {
+  return html.replace(INNERMOST, (whole, tag, attrs, inner) => {
+    if (!/<br\b/i.test(inner)) return whole;
+    const lines = inner.replace(/\s+/g, ' ').split(/<br\b[^>]*>/i).map(line => line.trim());
+    while (lines.length && !lines.at(-1)) lines.pop();
+    // A table cell clips a <pre> to its first line; keep its words apart instead.
+    return /^t[dh]$/i.test(tag) ? `<${tag}${attrs}>${lines.join(' ')}</${tag}>` : `<pre>${lines.join('\n')}</pre>`;
+  });
+}
+
+// TextView renders HTML natively without CSS or scripts. Drop what cannot
+// render (or would render wrongly: hidden preheaders), and never load remote
+// images, which senders use to track when a letter is opened.
+export function emailHtml(value) {
+  return keepLineBreaks(String(value || '')
+    .replace(/<!--[\s\S]*?-->/g, '').replace(/<!doctype[^>]*>/gi, '')
+    .replace(/<(script|style|head|title|noscript|template|iframe|object|svg)\b[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<(script|style|link|meta|base|iframe|object|embed|input|button|form|source|video|audio)\b[^>]*>/gi, '')
+    .replace(/<(\w+)\b[^>]*style\s*=\s*["'][^"']*(display\s*:\s*none|max-height\s*:\s*0|opacity\s*:\s*0)[^"']*["'][^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<img\b[^>]*>/gi, tag => { const alt = tag.match(/\balt\s*=\s*("([^"]*)"|'([^']*)')/i); const label = (alt?.[2] ?? alt?.[3] ?? '').trim(); return label ? `[${label}]` : ''; })
+    .replace(/\s(on\w+|style|class|id|bgcolor|background)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\shref\s*=\s*("\s*(?!https?:|mailto:)[^"]*"|'\s*(?!https?:|mailto:)[^']*'|(?!["']|https?:|mailto:)[^\s>]+)/gi, '')
+    .trim());
+}
+// Plain-text letters keep their lines and indentation and gain clickable
+// links; multi-line paragraphs go through <pre> for the reason above.
+export function textHtml(value) {
+  return String(value || '').replace(/\r\n?/g, '\n').trim().split(/\n\s*\n/).map(paragraph => {
+    const html = escapeHtml(paragraph.replace(/\s+$/gm, '')).replace(/\bhttps?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]]/g, url => `<a href="${url}">${url}</a>`);
+    return html.includes('\n') ? `<pre>${html}</pre>` : `<p>${html}</p>`;
+  }).join('');
+}
+
 export function mailboxAddress(value) {
   const source = clean(value);
   const matched = source.match(/<([^<>]+)>/);
@@ -196,12 +383,12 @@ export function parseMessage(raw) {
     else if (part.body?.data) {
       const charset = (part.headers || []).find(h => h.name.toLowerCase() === 'content-type')?.value.match(/charset=["']?([^\s;"']+)/i)?.[1] || 'utf8';
       if (part.mimeType === 'text/plain') plain.push(decode64(part.body.data, charset));
-      if (part.mimeType === 'text/html') html.push(htmlToText(decode64(part.body.data, charset)));
+      if (part.mimeType === 'text/html') html.push(decode64(part.body.data, charset));
     }
     (part.parts || []).forEach(walk);
   }
   walk(raw.payload);
-  return { id: raw.id, threadId: raw.threadId, from, sender: from.replace(/\s*<[^>]+>/, '').replace(/^"|"$/g, '') || from, to: header('To'), replyTo: header('Reply-To') || from, subject: header('Subject') || '(No subject)', messageId: header('Message-ID'), references: header('References'), date: Number(raw.internalDate) || Date.parse(header('Date')) || 0, snippet: htmlToText(raw.snippet || ''), body: (plain.length ? plain : html).join('\n\n'), labels: raw.labelIds || [], unread: (raw.labelIds || []).includes('UNREAD'), starred: (raw.labelIds || []).includes('STARRED'), attachments };
+  return { id: raw.id, threadId: raw.threadId, from, sender: from.replace(/\s*<[^>]+>/, '').replace(/^"|"$/g, '') || from, to: header('To'), replyTo: header('Reply-To') || from, subject: header('Subject') || '(No subject)', messageId: header('Message-ID'), references: header('References'), date: Number(raw.internalDate) || Date.parse(header('Date')) || 0, snippet: htmlToText(raw.snippet || ''), body: (plain.length ? plain : html.map(htmlToText)).join('\n\n'), html: html.length ? emailHtml(html.join('\n')) : plain.length ? textHtml(plain.join('\n\n')) : '', labels: raw.labelIds || [], unread: (raw.labelIds || []).includes('UNREAD'), starred: (raw.labelIds || []).includes('STARRED'), attachments };
 }
 
 export function buildRawMessage(fields) {
