@@ -44,6 +44,7 @@ jobs:
           done
           python3 apps/folio-deck/tests/install_test.py
           python3 apps/finder/tests/check-views.py
+          python3 apps/chat/tests/check-views.py
       - name: Package every app at the tag version
         env:
           RELEASE_TAG: ${{ github.ref_name }}

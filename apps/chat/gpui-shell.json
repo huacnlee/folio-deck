@@ -1,0 +1,33 @@
+{
+  "id": "com.huacnlee.chat",
+  "name": "Chat",
+  "version": "0.1.0",
+  "shell-version": "0.7.3",
+  "entry": "main.js",
+  "window": {
+    "width": 1180,
+    "height": 800
+  },
+  "capabilities": {
+    "storage": true,
+    "fs": {
+      "read": [
+        "${dataDir}",
+        "${homeDir}/.local/state/omarchy",
+        "${homeDir}/.local/share/omarchy",
+        "${homeDir}/.config/omarchy"
+      ],
+      "write": [
+        "${dataDir}"
+      ],
+      "execute": [
+        "claude",
+        "codex",
+        "fc-match"
+      ]
+    },
+    "clipboard": {
+      "write": true
+    }
+  }
+}
