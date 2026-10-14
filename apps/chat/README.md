@@ -1,6 +1,6 @@
 # Chat — your local Claude and Codex in one window
 
-A desktop chat client in the shape of ChatGPT and Claude Desktop, built entirely with gpui-shell JavaScript and native GPUI elements. It does not call any API itself: every reply comes from the `claude` or `codex` command-line tool already installed and signed in on this computer, so it uses your own subscription, models and configuration. The interface follows the Omarchy style used across this repository: the system monospace font, square corners, hairline dividers, foreground-tinted states and the current Omarchy palette with a Tokyo Night fallback.
+A desktop chat client in the shape of ChatGPT and Claude Desktop, built entirely with gpui-shell JavaScript and native GPUI elements. It does not call any API itself: every reply comes from the `claude` or `codex` command-line tool already installed and signed in on this computer, so it uses your own subscription, models and configuration. The interface is built from [zion-ui](https://github.com/huacnlee/zion-ui), declared as a Git dependency in `gpui-shell.json`: near-black surfaces, a muted green accent, sans-serif for words and monospace for data. The welcome screen checks which of the two tools are installed and shows their versions.
 
 ## Reference
 
@@ -22,7 +22,7 @@ gpui-shell dev apps/chat
 - Sidebar with New chat, search across titles and messages, and chats grouped as Today, Yesterday, Previous 7 days and Older. Right-click a chat to rename or delete it; deleting asks first and offers Undo.
 - Claude or Codex per message, chosen in the composer. Claude offers Default, Opus, Sonnet and Haiku (the CLI's own aliases); Codex uses the model in `~/.codex/config.toml`.
 - Multi-turn conversations continue the tool's own session: `claude -p --resume <session>` and `codex exec resume <thread>`. Switching provider in the middle of a chat, or a session the tool no longer knows, starts a new session that receives the earlier messages as context.
-- Replies render as Markdown and can be selected. The latest reply has Copy and Retry. While a reply is generated the transcript shows the elapsed time, what Codex is running, and any thinking text that has arrived.
+- Replies stream in as they are written, render as Markdown and can be selected. The latest reply has Copy and Retry. While a reply is generated the transcript shows the elapsed time, what Codex is running, and any thinking text that has arrived.
 - Each reply records its provider, model, duration and, for Claude, its cost.
 - Chats are saved to `conversations.json` in the app's data directory after every change and survive restarts. A reply cut off by closing the app is marked as interrupted. A damaged entry in the file is skipped instead of discarding the rest; a file that cannot be read is never overwritten.
 - Safety: Claude runs with all tools turned off (`--tools ""`) and Codex starts in its read-only sandbox, so a chat never edits files. Prompts are passed after `--`, so a message beginning with `-` is never read as an option.
@@ -33,7 +33,7 @@ gpui-shell dev apps/chat
 | --- | --- |
 | Enter / Shift+Enter | Send / new line |
 | Ctrl+Enter | Send |
-| Escape | Stop the reply (needs streaming, see Limits), or close a menu or dialog |
+| Escape | Stop the reply, or close a menu or dialog |
 | Ctrl+N | New chat |
 | Ctrl+B | Show or hide the sidebar |
 
@@ -41,10 +41,9 @@ gpui-shell dev apps/chat
 
 | Grant | Purpose |
 | --- | --- |
-| `fs.read` / `fs.write` `${dataDir}` | Save and load chats; the working directory the tools run in |
-| `fs.read` `~/.local/state/omarchy`, `~/.local/share/omarchy`, `~/.config/omarchy` | Read the current Omarchy theme |
-| Execute `claude`, `codex` | Generate replies with your local sign-in |
-| Execute `fc-match` | Resolve the system `monospace` font, as the Omarchy shell does |
+| `fs.read` / `fs.write` `${dataDir}` | Save and load chats; `workspace/` inside it is the working directory the tools run in, so their sessions are filed under one project and resume reliably |
+| Execute `claude`, `codex` | Generate replies with your local sign-in, and read their versions |
+| Execute `fc-match` | Resolve the system `monospace` family for data |
 | Storage | Remember the chosen provider, model and sidebar state |
 | Clipboard write | Copy a reply |
 
@@ -52,7 +51,7 @@ gpui-shell starts commands with an empty environment. Both tools still find thei
 
 ## Differences and limits
 
-- **Streaming and long replies depend on the runtime.** The current gpui-shell `process.run` waits for a command to finish and stops it after 30 seconds. Until the runtime has a streaming `process.spawn`, a reply appears all at once, a reply that takes longer than 30 seconds fails with an explanation and Retry, and Stop is disabled. The app already uses `process.spawn` when it exists, with line-by-line output and a working Stop; no change to the app is needed.
+- Replies stream through gpui-shell's `process.spawn`: Claude's text arrives token by token, Codex's per message, with no time limit, and Stop (or Escape) kills the tool's whole process group. On an older gpui-shell without `process.spawn` the app falls back to `process.run`, which shows the reply all at once, stops after 30 seconds and cannot be stopped early.
 - No attachments, images, voice, projects or artifacts. No tools: these chats cannot read or change files.
 - Model lists are the tools' aliases; there is no account or usage view.
 - The transcript's rows are drawn by a virtual list, which cannot own buttons, so Copy and Retry act on the latest reply only; earlier replies can be selected and copied as text.

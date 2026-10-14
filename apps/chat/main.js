@@ -1,16 +1,16 @@
 // @ts-check
 import { View, div, svg } from 'gpui-kit';
-import { h_flex, v_flex, Button, Input, InputState, Textarea, TextareaState, TextView, Popup } from 'gpui-base';
+import { h_flex, v_flex, Input, InputState, Textarea, TextareaState, TextView, Popup } from 'gpui-base';
 import { MessageScroller, MessageScrollerState, ShimmerText } from 'gpui-component';
 import * as fs from 'fs/promises';
-import { homedir } from 'os';
 import { randomUUID } from 'crypto';
-import { applyPalette, tones as T } from './theme.js';
-import { DEFAULT, systemPalette } from './lib/theme.js';
-import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt } from './lib/providers.js';
+import {
+  AppFrame, Badge, Button, Card, Chip, EmptyState, IconBadge, IconButton, Kbd, Legend, MenuList, NavItem, NavSection,
+  PageHeader, SearchField, Segmented, SelectTrigger, Sidebar, Steps, Tag, applyTheme, theme,
+} from 'zion-ui';
+import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion } from './lib/providers.js';
 import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost } from './lib/store.js';
 
-const home = homedir();
 const PREFS = 'chat.preferences.v1';
 const SUGGESTIONS = [
   'Explain the difference between a process and a thread',
@@ -18,7 +18,9 @@ const SUGGESTIONS = [
   'Review this plan and list the risks I am missing',
   'Summarize the main ideas of the Unix philosophy',
 ];
-const icon = (name, size = 14) => svg(`chat/icons/${name}.svg`).size(size).flex_shrink_0();
+// Asset paths resolve against the application root.
+const asset = (name) => `chat/icons/${name}.svg`;
+const icon = (name, size = 14) => svg(asset(name)).size(size).flex_shrink_0();
 const reason = (error) => String(error?.message ?? error).replace(/^Error:\s*/, '');
 function loadPrefs() { try { return JSON.parse(localStorage.getItem(PREFS) ?? '{}'); } catch { return {}; } }
 function savePrefs(value) { try { localStorage.setItem(PREFS, JSON.stringify(value)); } catch {} }
@@ -26,9 +28,9 @@ function savePrefs(value) { try { localStorage.setItem(PREFS, JSON.stringify(val
 export default class Chat extends View {
   init(_props, cx) {
     const prefs = loadPrefs();
-    applyPalette();
-    this.palette = DEFAULT;
-    this.font = process.platform === 'darwin' ? 'Menlo' : 'JetBrainsMono Nerd Font';
+    applyTheme({ mono: process.platform === 'darwin' ? 'Menlo' : 'JetBrainsMono Nerd Font' });
+    // `null` while checking; a version string, or `false` when not installed.
+    this.versions = { claude: null, codex: null };
     this.focus = cx.focus_handle();
     this.focus.focus();
     this.conversations = [];
@@ -62,15 +64,15 @@ export default class Chat extends View {
       if (process.platform === 'darwin') return;
       const result = await process.run('fc-match', ['monospace', '-f', '%{family[0]}']).catch(() => null);
       const family = result?.code === 0 ? result.stdout.trim() : '';
-      if (family) { this.font = family; cx.notify(); }
+      if (family) { applyTheme({ mono: family }); cx.notify(); }
     });
-    cx.spawn(async (cx) => {
-      for (;;) {
-        const palette = await systemPalette(fs, home);
-        if (JSON.stringify(palette) !== JSON.stringify(this.palette)) { this.palette = palette; applyPalette(palette); cx.notify(); }
-        await cx.sleep(2500);
-      }
-    });
+    for (const id of providerIds) {
+      cx.spawn(async (cx) => {
+        const result = await process.run(PROVIDERS[id].command, ['--version'], { timeoutMs: 15000 }).catch(() => null);
+        this.versions[id] = (result?.code === 0 && parseVersion(result.stdout)) || false;
+        cx.notify();
+      });
+    }
   }
 
   // ---- persistence -------------------------------------------------------
@@ -336,95 +338,99 @@ export default class Chat extends View {
 
   // ---- rendering ---------------------------------------------------------
 
-  // Omarchy buttons: plain is transparent until hovered; outline, primary and
-  // danger express emphasis through edge and text, never a solid fill.
-  button(id, label, iconName, onClick, { disabled = false, selected = false, variant = 'plain', tip = '' } = {}) {
-    const edge = { plain: T.clear, outline: T.controlBorder, primary: T.accent, danger: T.danger }[variant];
-    const ink = { primary: T.accent, danger: T.danger }[variant] ?? T.foreground;
-    return Button.new(id).flex_shrink_0().px(label ? 10 : 6).py(5)
-      .accessibility_label(label || tip || id)
-      .border(1).border_color(edge).text_color(ink).text_size(12)
-      .bg(selected ? T.selected : variant === 'outline' ? T.normal : T.clear)
-      .when(selected, (el) => el.font_bold())
-      .disabled(disabled).when(disabled, (el) => el.opacity(0.45))
-      .when(!disabled, (el) => el.hover((style) => style.bg(selected ? T.selected : T.hover)).active((style) => style.bg(T.pressed)))
-      .when(Boolean(tip), (el) => el.tooltip(tip))
-      .on_click((_event, cx) => onClick(cx))
-      .child(h_flex().gap(8).items_center()
-        .when(Boolean(iconName), (el) => el.child(icon(iconName)))
-        .when(Boolean(label), (el) => el.child(label)));
-  }
   render(cx) {
     const conversation = this.current();
-    return h_flex().id('chat').track_focus(this.focus).key_context('Chat').relative().size_full().min_w_0().items_stretch()
-      .bg(T.background).text_color(T.foreground).text_size(12).font_family(this.font)
+    const main = v_flex().size_full().min_h_0()
+      .child(this.renderHeader(conversation, cx))
+      .when(Boolean(this.message), (el) => el.child(this.renderBanner(cx)))
+      .child(conversation && conversation.messages.length ? this.renderTranscript(conversation, cx) : this.renderWelcome(cx))
+      .when(Boolean(conversation?.messages.length), (el) => { const actions = this.renderReplyActions(conversation, cx); return actions ? el.child(actions) : el; })
+      .child(this.renderComposer(cx));
+    return div().id('chat').track_focus(this.focus).key_context('Chat').relative().size_full()
       .on_key_down((event, cx) => this.key(event, cx))
-      .when(this.sidebar, (el) => el.child(this.renderSidebar(cx)))
-      .child(v_flex().flex_1().min_w_0().min_h_0()
-        .child(this.renderHeader(conversation, cx))
-        .when(Boolean(this.message), (el) => el.child(this.renderBanner(cx)))
-        .child(conversation && conversation.messages.length ? this.renderTranscript(conversation, cx) : this.renderWelcome(cx))
-        .when(Boolean(conversation?.messages.length), (el) => { const actions = this.renderReplyActions(conversation, cx); return actions ? el.child(actions) : el; })
-        .child(this.renderComposer(cx)))
+      .child(new AppFrame('chat-frame').sidebar(this.sidebar ? this.renderSidebar(cx) : null).main(main).build(cx))
       .when(Boolean(this.dialog), (el) => el.child(this.renderDialog(cx)))
-      .when(Boolean(this.menu), (el) => el.child(this.renderMenu(cx)));
+      .when(Boolean(this.menu && this.menu.kind !== 'model'), (el) => el.child(this.renderMenu(cx)))
+      .when(this.menu?.kind === 'model', (el) => el.child(this.renderBackdrop(cx)));
   }
   renderSidebar(cx) {
     const query = this.search.value();
     const groups = groupByDate(filterConversations(this.conversations, query), Date.now());
-    const heading = (text) => div().h(28).px(8).pt(10).text_size(10).font_bold().text_color(T.secondary).child(text.toUpperCase());
-    // Pointer listeners belong on an element the shell owns, so a row wraps its Button.
-    const row = (conversation) => {
-      const current = conversation.id === this.currentId, busy = this.running?.conversation.id === conversation.id;
-      return div().w_full().flex_shrink_0()
-        .on_mouse_down('right', (event, cx) => { cx.stop_propagation(); this.menu = { id: conversation.id, x: event.position.x, y: event.position.y }; cx.notify(); })
-        .child(Button.new(`chat-${conversation.id}`).w_full().h(30).accessibility_label(displayTitle(conversation))
-          .bg(current ? T.selected : T.clear).when(current, (el) => el.font_bold())
-          .when(!current, (el) => el.hover((style) => style.bg(T.hover)))
-          .on_click((_event, cx) => this.select(conversation.id, cx))
-          .child(h_flex().w_full().h_full().px(8).gap(8).items_center().justify_start()
-            .child(div().flex_1().min_w_0().truncate().child(displayTitle(conversation)))
-            .when(busy, (el) => el.child(div().size(6).flex_shrink_0().bg(T.accent)))));
+    const items = [
+      new Button('new-chat').label('New chat').icon(asset('plus')).variant('primary').fullWidth().tooltip('Ctrl + N')
+        .onClick((_event, cx) => this.newChat(cx)).build(cx),
+    ];
+    if (!this.loaded) items.push(div().px(8).py(10).text_size(12).text_color(theme().colors.secondary).child('Loading chats…'));
+    else if (!groups.length) items.push(div().px(8).py(10).text_size(12).text_color(theme().colors.secondary).child(query.trim() ? 'No chats match this search.' : 'No chats yet.'));
+    for (const group of groups) {
+      items.push(new NavSection(group.label).build(cx));
+      for (const conversation of group.items) {
+        items.push(new NavItem(`chat-${conversation.id}`).label(displayTitle(conversation))
+          .selected(conversation.id === this.currentId).indicator(this.running?.conversation.id === conversation.id)
+          .onClick((_event, cx) => this.select(conversation.id, cx))
+          .onSecondaryPress((event, cx) => { cx.stop_propagation(); this.menu = { id: conversation.id, x: event.position.x, y: event.position.y }; cx.notify(); })
+          .build(cx));
+      }
+    }
+    const status = (id) => {
+      const version = this.versions[id];
+      return { label: PROVIDERS[id].command, value: version === null ? 'checking' : version || 'not found', tone: version ? 'success' : 'neutral' };
     };
-    return v_flex().w(260).flex_shrink_0().min_h_0().p(8).gap(6).border_r(1).border_color(T.divider)
-      .child(h_flex().gap(4).items_center()
-        .child(this.button('new-chat', 'New chat', 'plus', (cx) => this.newChat(cx), { variant: 'outline', tip: 'Ctrl + N' }).flex_1())
-        .child(this.button('hide-sidebar', '', 'panel-left', (cx) => { this.sidebar = false; this.persistPrefs(); cx.notify(); }, { tip: 'Hide sidebar (Ctrl + B)' })))
-      .child(h_flex().h(28).px(8).gap(8).items_center().bg(T.normal).border(1).border_color(T.controlBorder)
-        .child(div().text_color(T.secondary).child(icon('search', 12))).child(Input.new(this.search).flex_1().min_w_0().text_size(12)))
-      .child(v_flex().id('chat-list').flex_1().min_h_0().overflow_y_scrollbar()
-        .when(!this.loaded, (el) => el.child(div().p(8).text_color(T.secondary).child('Loading chats…')))
-        .when(this.loaded && !groups.length, (el) => el.child(div().p(8).text_color(T.secondary).child(query.trim() ? 'No chats match this search.' : 'No chats yet. Start one on the right.')))
-        .children(groups.flatMap((group) => [heading(group.label), ...group.items.map(row)])));
+    return new Sidebar('nav').brand('Chat').brandMark(asset('message'))
+      .search(new SearchField('chat-search', this.search).icon(asset('search')).build(cx))
+      .children(items)
+      .footer(new Legend(providerIds.map(status)).build(cx))
+      .build(cx);
   }
   renderHeader(conversation, cx) {
-    return h_flex().h(44).flex_shrink_0().px(12).gap(8).items_center().border_b(1).border_color(T.divider)
-      .when(!this.sidebar, (el) => el.child(this.button('show-sidebar', '', 'panel-left', (cx) => { this.sidebar = true; this.persistPrefs(); cx.notify(); }, { tip: 'Show sidebar (Ctrl + B)' })))
-      .child(div().flex_1().min_w_0().truncate().text_size(14).font_bold().child(conversation ? displayTitle(conversation) : 'New chat'))
-      .when(Boolean(conversation), (el) => el
-        .child(this.button('rename-chat', '', 'edit', (cx) => this.askRename(conversation.id, cx), { tip: 'Rename chat' }))
-        .child(this.button('delete-chat', '', 'trash', (cx) => this.askDelete(conversation.id, cx), { tip: 'Delete chat…', disabled: this.running?.conversation.id === conversation?.id })));
+    const provider = PROVIDERS[this.provider];
+    const model = provider.models.find((item) => item.id === this.model) ?? provider.models[0];
+    const busy = Boolean(this.running && this.running.conversation === conversation);
+    const actions = [];
+    if (conversation) {
+      actions.push(
+        new IconButton('rename-chat').icon(asset('edit')).description('Rename chat').onClick((_e, cx) => this.askRename(conversation.id, cx)).build(cx),
+        new IconButton('delete-chat').icon(asset('trash')).description('Delete chat…').disabled(busy).onClick((_e, cx) => this.askDelete(conversation.id, cx)).build(cx),
+      );
+    }
+    actions.push(new IconButton('toggle-sidebar').icon(asset('panel-left')).selected(this.sidebar)
+      .description(this.sidebar ? 'Hide sidebar (Ctrl + B)' : 'Show sidebar (Ctrl + B)')
+      .onClick((_e, cx) => { this.sidebar = !this.sidebar; this.persistPrefs(); cx.notify(); }).build(cx));
+    const count = conversation ? conversation.messages.length : 0;
+    const header = new PageHeader(conversation ? displayTitle(conversation) : 'New chat')
+      .breadcrumb([provider.label, model.id || 'default model'])
+      .badge(new Badge(busy ? 'Replying' : 'Ready').tone(busy ? 'accent' : 'neutral').dot().build(cx))
+      .actions(actions);
+    if (count) header.meta(`${count} message${count === 1 ? '' : 's'}`);
+    return header.build(cx);
   }
   renderBanner(cx) {
-    const text = String(this.message.text).split('\n').map((line) => line.trim()).filter(Boolean).pop() ?? '';
-    return h_flex().h(32).flex_shrink_0().px(12).gap(6).items_center().border_b(1).border_color(T.divider)
-      .child(div().id('banner-text').flex_1().min_w_0().truncate().text_color(this.message.error ? T.danger : T.foreground).child(text))
-      .when(Boolean(this.message.undo && this.deleted), (el) => el.child(this.button('undo-delete', 'Undo', '', (cx) => this.undoDelete(cx), { variant: 'outline' }).py(2)))
-      .child(this.button('dismiss', '', 'close', (cx) => { this.message = null; cx.notify(); }, { tip: 'Dismiss' }).py(2));
+    const t = theme(), text = String(this.message.text).split('\n').map((line) => line.trim()).filter(Boolean).pop() ?? '';
+    const tone = t.tone(this.message.error ? 'danger' : 'neutral');
+    return h_flex().flex_shrink_0().mx(24).mb(8).px(12).h(34).gap(8).items_center().rounded(t.radius.control).bg(tone.bg).border(1).border_color(tone.border)
+      .child(div().flex_1().min_w_0().truncate().text_size(t.type.body).text_color(tone.fg).child(text))
+      .when(Boolean(this.message.undo && this.deleted), (el) => el.child(new Button('undo-delete').label('Undo').variant('outline').size('sm').onClick((_e, cx) => this.undoDelete(cx)).build(cx)))
+      .child(new IconButton('dismiss').icon(asset('close')).description('Dismiss').size('sm').onClick((_e, cx) => { this.message = null; cx.notify(); }).build(cx));
   }
   renderWelcome(cx) {
     const provider = PROVIDERS[this.provider];
-    return v_flex().flex_1().min_h_0().items_center().justify_center().p(24).gap(14)
-      .child(div().text_size(24).font_bold().text_color(T.bright).child('What can I help with?'))
-      .child(div().max_w(520).text_center().text_color(T.secondary)
-        .child(`Replies come from ${provider.label} through your local \`${provider.command}\` sign-in. ${this.provider === 'claude' ? 'Tools are turned off.' : 'Codex runs read-only.'}`))
-      .child(v_flex().w_full().max_w(560).gap(6).pt(6)
-        .children(SUGGESTIONS.map((text, index) => Button.new(`suggestion-${index}`).w_full().accessibility_label(text)
-          .border(1).border_color(T.controlBorder).bg(T.normal).hover((style) => style.bg(T.hover))
-          .on_click((_event, cx) => { this.composer.set_value(text); cx.notify(); })
-          .child(h_flex().w_full().px(12).py(8).gap(8).items_center().justify_start()
-            .child(div().text_color(T.secondary).child(icon('message', 12)))
-            .child(div().flex_1().min_w_0().truncate().child(text))))));
+    const step = (id) => {
+      const version = this.versions[id];
+      return { title: id === 'claude' ? 'Claude Code' : 'Codex CLI', detail: version === null ? 'checking…' : version ? `v${version}` : 'not installed', done: Boolean(version) };
+    };
+    return div().id('welcome').flex_1().min_h_0().overflow_y_scrollbar().px(24).py(12)
+      .child(h_flex().w_full().justify_center()
+        .child(div().w_full().max_w(720)
+          .child(new Card('welcome-card').title('New chat').subtitle(`${provider.label} · your local ${provider.command} sign-in`).icon(asset('message'))
+            .trailing(new Tag(`${this.conversations.length} saved`).build(cx))
+            .body(new EmptyState('What can I help with?').art(new IconBadge(asset('terminal')).size(48).build(cx))
+              .description(`Replies come from your own ${provider.label} account through the ${provider.command} command. ${this.provider === 'claude' ? 'Tools are turned off.' : 'Codex runs read-only.'}`)
+              .children([
+                new Steps([step('claude'), step('codex'), { title: 'First message', detail: 'not yet' }]).build(cx),
+                h_flex().flex_wrap().gap(8).justify_center().children(SUGGESTIONS.map((text, index) => new Chip(`suggestion-${index}`).label(text).sans()
+                  .onClick((_event, cx) => { this.composer.set_value(text); cx.notify(); }).build(cx))),
+              ]).build(cx))
+            .build(cx))));
   }
   renderTranscript(conversation, cx) {
     return MessageScroller.new(`transcript-${conversation.id}`, this.scroller, (index) => {
@@ -432,107 +438,102 @@ export default class Chat extends View {
       return message ? this.renderMessage(conversation, message) : null;
     }).scrollbar(true).jump_button(true).jump_button_label('Latest').flex_1().min_h_0().w_full();
   }
+  // Transcript rows are laid out by the list, so they hold no handlers and no
+  // retained components; they paint with the theme's colors directly.
   renderMessage(conversation, message) {
-    const column = (child) => h_flex().w_full().justify_center().py(10).child(v_flex().w_full().max_w(780).px(24).child(child));
+    const t = theme(), c = t.colors;
+    const column = (child) => h_flex().w_full().justify_center().py(10).child(v_flex().w_full().max_w(760).px(24).child(child));
     if (message.role === 'user') {
       return column(h_flex().w_full().justify_end()
-        .child(div().max_w('85%').px(12).py(8).bg(T.selected).text_color(T.bright).whitespace_normal().child(message.text)));
+        .child(div().max_w('85%').px(14).py(9).rounded(t.radius.well).bg(c.raised).text_size(t.type.body + 1).text_color(c.bright).whitespace_normal().child(message.text)));
     }
     const run = this.running?.assistant === message ? this.running : null;
     const provider = PROVIDERS[message.provider ?? conversation.provider];
-    const meta = [provider.label, message.model, message.durationMs ? formatDuration(message.durationMs) : null, typeof message.cost === 'number' ? formatCost(message.cost) : null].filter(Boolean).join(' · ');
+    const parts = run ? [provider.label, `${Math.round((Date.now() - run.startedAt) / 1000)} s`] : [provider.label, message.model, message.durationMs ? formatDuration(message.durationMs) : null].filter(Boolean);
+    const cost = !run && typeof message.cost === 'number' ? formatCost(message.cost) : null;
     const waiting = run && !message.text;
     return column(v_flex().w_full().gap(6)
-      .child(h_flex().gap(6).items_center().text_size(11).text_color(T.secondary)
-        .child(icon('terminal', 12)).child(run ? `${provider.label} · ${Math.round((Date.now() - run.startedAt) / 1000)} s` : meta))
+      .child(h_flex().gap(6).items_center().text_size(t.type.small).font_family(t.fonts.mono).text_color(c.secondary)
+        .child(div().text_color(run ? c.accent : c.secondary).child(icon('terminal', 12)))
+        .child(parts.join(' · '))
+        .when(Boolean(cost), (el) => el.child(div().text_color(c.accent).child(cost))))
       .when(Boolean(waiting), (el) => el.child(v_flex().gap(4)
         .child(ShimmerText.new(run.turn.activity || 'Thinking…').id(`shimmer-${message.id}`))
-        .when(Boolean(run?.turn.thinking), (el) => el.child(div().text_size(11).text_color(T.secondary).whitespace_normal().child(run.turn.thinking.slice(-600))))))
-      .when(Boolean(message.text), (el) => el.child(TextView.markdown(`reply-${message.id}`, message.text).selectable(true).w_full().text_size(13)))
-      .when(Boolean(message.error), (el) => el.child(div().text_color(T.danger).whitespace_normal().child(message.error))));
+        .when(Boolean(run?.turn.thinking), (el) => el.child(div().text_size(t.type.small).text_color(c.secondary).whitespace_normal().child(run.turn.thinking.slice(-600))))))
+      .when(Boolean(message.text), (el) => el.child(TextView.markdown(`reply-${message.id}`, message.text).selectable(true).w_full().text_size(t.type.body + 1)))
+      .when(Boolean(message.error), (el) => el.child(div().text_size(t.type.body).text_color(t.tone('danger').fg).whitespace_normal().child(message.error))));
   }
-  // Transcript rows are laid out by the list and cannot own handlers, so the
-  // latest reply's actions sit between the transcript and the composer.
+  // The latest reply's actions sit between the transcript and the composer.
   renderReplyActions(conversation, cx) {
     const last = conversation.messages[conversation.messages.length - 1];
     if (this.running || last?.role !== 'assistant') return null;
+    const copied = this.copied === last.id;
     return h_flex().w_full().flex_shrink_0().justify_center().px(24)
-      .child(h_flex().w_full().max_w(780).gap(2).items_center()
-        .when(Boolean(last.text), (el) => el.child(this.button('copy-reply', this.copied === last.id ? 'Copied' : 'Copy', this.copied === last.id ? 'check' : 'copy', (cx) => this.copy(last, cx), { tip: 'Copy the latest reply' })))
-        .child(this.button('retry-reply', 'Retry', 'refresh', (cx) => this.retry(cx), { tip: 'Ask again' })));
+      .child(h_flex().w_full().max_w(760).px(24).gap(4).items_center()
+        .when(Boolean(last.text), (el) => el.child(new Button('copy-reply').label(copied ? 'Copied' : 'Copy').icon(asset(copied ? 'check' : 'copy')).variant('ghost').size('sm').tooltip('Copy the latest reply').onClick((_e, cx) => this.copy(last, cx)).build(cx)))
+        .child(new Button('retry-reply').label('Retry').icon(asset('refresh')).variant('ghost').size('sm').tooltip('Ask again').onClick((_e, cx) => this.retry(cx)).build(cx)));
   }
   renderComposer(cx) {
-    const provider = PROVIDERS[this.provider], running = Boolean(this.running);
+    const t = theme(), c = t.colors, provider = PROVIDERS[this.provider], running = Boolean(this.running);
     const empty = !this.composer.value().trim();
     const model = provider.models.find((item) => item.id === this.model) ?? provider.models[0];
-    return h_flex().w_full().flex_shrink_0().justify_center().px(24).pb(14).pt(6)
-      .child(v_flex().w_full().max_w(780).gap(6)
-        .child(v_flex().w_full().bg(T.normal).border(1).border_color(T.controlBorder)
-          .child(div().w_full().px(12).pt(10).pb(4).on_key_down((event, cx) => this.composerKey(event, cx))
-            .child(Textarea.new(this.composer).w_full().text_size(13)))
-          .child(h_flex().h(36).px(6).gap(4).items_center()
-            .child(h_flex().gap(2)
-              .children(providerIds.map((id) => this.button(`provider-${id}`, PROVIDERS[id].label, '', (cx) => this.setProvider(id, cx), { selected: this.provider === id, disabled: running }))))
-            .when(provider.models.length > 1, (el) => el.child(Popup.new('model-popup', this.button('model', model.label, 'chevron-down', (cx) => { this.menu = { kind: 'model' }; cx.notify(); }, { disabled: running, tip: 'Model' }))
-              .anchor('bottom_left').when(this.menu?.kind === 'model', (el) => el.content(this.renderMenuList(cx)))))
+    const modelMenu = new MenuList('model-list').width(200).items(provider.models.map((item) => ({
+      id: item.id || 'default', label: item.label, checked: item.id === this.model,
+      onSelect: (cx) => { this.menu = null; this.setModel(item.id, cx); },
+    }))).build(cx);
+    return h_flex().w_full().flex_shrink_0().justify_center().px(24).pb(16).pt(8)
+      .child(v_flex().w_full().max_w(760).gap(6)
+        .child(v_flex().w_full().rounded(t.radius.card).bg(c.card).border(1).border_color(c.borderStrong)
+          .child(div().w_full().px(14).pt(12).pb(4).on_key_down((event, cx) => this.composerKey(event, cx))
+            .child(Textarea.new(this.composer).w_full().text_size(t.type.body + 1)))
+          .child(h_flex().px(8).pb(8).gap(6).items_center()
+            .child(new Segmented('provider').options(providerIds.map((id) => ({ id, label: PROVIDERS[id].label }))).selected(this.provider)
+              .disabled(running).onSelect((id, cx) => this.setProvider(id, cx)).build(cx))
+            .when(provider.models.length > 1, (el) => el.child(Popup.new('model-popup', new SelectTrigger('model').value(model.label).mono().chevron(asset('chevron-down')).open(this.menu?.kind === 'model').disabled(running)
+                .onClick((_e, cx) => { this.menu = this.menu?.kind === 'model' ? null : { kind: 'model' }; cx.notify(); }).build(cx))
+              .anchor('bottom_left').when(this.menu?.kind === 'model', (el) => el.content(modelMenu))))
             .child(div().flex_1())
-            .child(div().text_size(11).text_color(T.secondary).child(running ? 'Esc stops' : 'Enter sends · Shift + Enter adds a line'))
+            .child(new Kbd(running ? 'Esc stops' : 'Enter sends').build(cx))
             .child(running
-              ? this.button('stop', 'Stop', 'stop', (cx) => this.stop(cx), { variant: 'danger', disabled: !this.running.cancel, tip: this.running.cancel ? 'Stop (Esc)' : 'Stopping needs streaming support (process.spawn) in gpui-shell' })
-              : this.button('send', 'Send', 'send', (cx) => this.send(cx), { variant: 'primary', disabled: empty || !this.loaded }))))
-        .child(div().w_full().text_center().text_size(10).text_color(T.secondary)
+              ? new Button('stop').label('Stop').icon(asset('stop')).variant('danger').size('sm').disabled(!this.running.cancel)
+                .tooltip(this.running.cancel ? 'Stop (Esc)' : 'Stopping needs process.spawn in gpui-shell').onClick((_e, cx) => this.stop(cx)).build(cx)
+              : new Button('send').label('Send').icon(asset('send')).variant('primary').size('sm').disabled(empty || !this.loaded).onClick((_e, cx) => this.send(cx)).build(cx))))
+        .child(div().w_full().text_center().text_size(t.type.caption).text_color(c.tertiary)
           .child(`${provider.label} can make mistakes. Chats are saved on this computer.`)));
   }
-  renderMenuList(cx) {
-    const menu = this.menu;
-    const items = menu.kind === 'model'
-      ? PROVIDERS[this.provider].models.map((model) => ({ label: model.label, check: model.id === this.model, run: (cx) => this.setModel(model.id, cx) }))
-      : [
-        { label: 'Rename…', icon: 'edit', run: (cx) => this.askRename(menu.id, cx) },
-        { label: 'Delete…', icon: 'trash', danger: true, disabled: this.running?.conversation.id === menu.id, run: (cx) => this.askDelete(menu.id, cx) },
-      ];
-    return v_flex().w(menu.kind === 'model' ? 180 : 200).p(6).gap(2).bg(T.background).border(1).border_color(T.accent)
-      .on_mouse_down('left', (_event, cx) => cx.stop_propagation())
-      .children(items.map((item, index) => Button.new(`menu-${index}`).w_full().h(28).accessibility_label(item.label).disabled(Boolean(item.disabled))
-        .when(Boolean(item.disabled), (el) => el.opacity(0.45))
-        .when(!item.disabled, (el) => el.hover((style) => style.bg(T.hover)))
-        .on_click((_event, cx) => { this.menu = null; item.run(cx); cx.notify(); })
-        .child(h_flex().w_full().h_full().px(8).gap(8).items_center().justify_start().text_color(item.danger ? T.danger : T.foreground)
-          .child(div().w(14).flex_shrink_0().child(item.icon ? icon(item.icon) : item.check ? icon('check') : div()))
-          .child(div().flex_1().min_w_0().truncate().child(item.label)))));
-  }
-  // A press outside the open menu closes it. The model menu is anchored to its
-  // button in the composer; a chat's menu opens at the pointer.
-  renderMenu(cx) {
-    const menu = this.menu;
+  // A press outside an open menu closes it.
+  renderBackdrop(_cx) {
     return div().absolute().inset_0()
       .on_mouse_down('left', (_event, cx) => { this.menu = null; cx.notify(); })
-      .on_mouse_down('right', (_event, cx) => { this.menu = null; cx.notify(); })
-      .when(menu.kind !== 'model', (el) => el.child(div().absolute().left(menu.x).top(menu.y)
-        .child(Popup.new('row-menu', div().size(1)).anchor('top_left').content(this.renderMenuList(cx)))));
+      .on_mouse_down('right', (_event, cx) => { this.menu = null; cx.notify(); });
+  }
+  renderMenu(cx) {
+    const menu = this.menu;
+    const list = new MenuList('row-menu-list').width(180).items([
+      { id: 'rename', label: 'Rename…', icon: asset('edit'), onSelect: (cx) => { this.menu = null; this.askRename(menu.id, cx); } },
+      { id: 'delete', label: 'Delete…', icon: asset('trash'), danger: true, disabled: this.running?.conversation.id === menu.id, onSelect: (cx) => { this.menu = null; this.askDelete(menu.id, cx); } },
+    ]).build(cx);
+    return this.renderBackdrop(cx)
+      .child(div().absolute().left(menu.x).top(menu.y).child(Popup.new('row-menu', div().size(1)).anchor('top_left').content(list)));
   }
   renderDialog(cx) {
-    const dialog = this.dialog;
+    const t = theme(), dialog = this.dialog;
     const conversation = this.conversations.find((item) => item.id === dialog.id);
     const title = conversation ? displayTitle(conversation) : '';
-    const body = dialog.kind === 'rename'
-      ? v_flex().gap(14)
-        .child(div().text_size(16).font_bold().child('Rename chat'))
-        .child(h_flex().h(30).px(10).items_center().bg(T.normal).border(1).border_color(T.controlBorder).child(Input.new(this.renameState).flex_1().text_size(12)))
-        .child(h_flex().justify_end().gap(6)
-          .child(this.button('rename-cancel', 'Cancel', '', (cx) => { this.dialog = null; cx.notify(); }, { variant: 'outline' }))
-          .child(this.button('rename-save', 'Rename', '', (cx) => this.confirmRename(cx), { variant: 'primary' })))
-      : v_flex().gap(14)
-        .child(div().text_size(16).font_bold().child(`Delete “${title}”?`))
-        .child(div().text_color(T.secondary).whitespace_normal().child(`The chat is removed from this app. The ${PROVIDERS[conversation?.provider ?? 'claude'].label} session files on disk are kept.`))
-        .child(h_flex().justify_end().gap(6)
-          .child(this.button('delete-cancel', 'Cancel', '', (cx) => { this.dialog = null; cx.notify(); }, { variant: 'outline' }))
-          .child(this.button('delete-confirm', 'Delete', '', (cx) => this.confirmDelete(cx), { variant: 'danger' })));
+    const rename = dialog.kind === 'rename';
+    const body = rename
+      ? h_flex().h(32).px(10).items_center().rounded(t.radius.control).bg(t.colors.well).border(1).border_color(t.colors.borderStrong).child(Input.new(this.renameState).flex_1().text_size(t.type.body))
+      : div().text_size(t.type.body).text_color(t.colors.secondary).whitespace_normal()
+        .child(`The chat is removed from this app. The ${PROVIDERS[conversation?.provider ?? 'claude'].label} session files on disk are kept.`);
+    const footer = h_flex().w_full().justify_end().gap(8)
+      .child(new Button(rename ? 'rename-cancel' : 'delete-cancel').label('Cancel').variant('secondary').onClick((_e, cx) => { this.dialog = null; this.focus.focus(); cx.notify(); }).build(cx))
+      .child(rename
+        ? new Button('rename-save').label('Rename').variant('primary').onClick((_e, cx) => this.confirmRename(cx)).build(cx)
+        : new Button('delete-confirm').label('Delete').variant('danger').onClick((_e, cx) => this.confirmDelete(cx)).build(cx));
     // A decision that needs an answer is never dismissed by a backdrop press.
-    return div().absolute().inset_0().flex().items_center().justify_center().bg(T.scrim)
-      .on_mouse_down('left', (_event, cx) => { cx.stop_propagation(); if (dialog.kind === 'rename') { this.dialog = null; cx.notify(); } })
-      .child(v_flex().w(420).max_w('92%').p(18).bg(T.background).border(1).border_color(T.accent)
-        .on_mouse_down('left', (_event, cx) => cx.stop_propagation())
-        .child(body));
+    return div().absolute().inset_0().flex().items_center().justify_center().bg(t.colors.scrim)
+      .on_mouse_down('left', (_event, cx) => { cx.stop_propagation(); if (rename) { this.dialog = null; cx.notify(); } })
+      .child(div().w(440).max_w('92%').on_mouse_down('left', (_event, cx) => cx.stop_propagation())
+        .child(new Card('dialog').title(rename ? 'Rename chat' : `Delete “${title}”?`).icon(asset(rename ? 'edit' : 'trash')).body(body).footer(footer).build(cx)));
   }
 }

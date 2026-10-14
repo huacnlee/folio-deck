@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildArgs, createTurn, applyLine, finishError, contextPrompt } from '../lib/providers.js';
+import { buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion } from '../lib/providers.js';
 
 const feed = (provider, events) => {
   const turn = createTurn();
@@ -86,4 +86,10 @@ test('context prompts carry recent history within a bound', () => {
   assert.ok(prompt.includes('Assistant: ' + 'b'.repeat(50)));
   assert.ok(!prompt.includes('a'.repeat(50)));
   assert.equal(contextPrompt([], 'Hello'), 'Hello');
+});
+
+test('versions come from either tool\'s --version output', () => {
+  assert.equal(parseVersion('2.1.296 (Claude Code)\n'), '2.1.296');
+  assert.equal(parseVersion('codex-cli 0.162.1\n'), '0.162.1');
+  assert.equal(parseVersion('command not found'), null);
 });

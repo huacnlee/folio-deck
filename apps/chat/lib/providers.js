@@ -210,3 +210,12 @@ export function contextPrompt(history, prompt, limit = 24000) {
   if (!lines.length) return prompt;
   return `Here is our conversation so far:\n\n${lines.join('\n\n')}\n\nContinue the conversation. Reply to this new message:\n\n${prompt}`;
 }
+
+/**
+ * The version a tool prints for `--version`: "2.1.296 (Claude Code)" and
+ * "codex-cli 0.162.1" both give their number; anything else gives null.
+ * @param {string} stdout
+ */
+export function parseVersion(stdout) {
+  return /\b(\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?)\b/.exec(String(stdout))?.[1] ?? null;
+}

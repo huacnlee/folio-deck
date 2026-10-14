@@ -8,14 +8,14 @@
     "width": 1180,
     "height": 800
   },
+  "dependencies": {
+    "zion-ui": "huacnlee/zion-ui"
+  },
   "capabilities": {
     "storage": true,
     "fs": {
       "read": [
-        "${dataDir}",
-        "${homeDir}/.local/state/omarchy",
-        "${homeDir}/.local/share/omarchy",
-        "${homeDir}/.config/omarchy"
+        "${dataDir}"
       ],
       "write": [
         "${dataDir}"
