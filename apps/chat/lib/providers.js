@@ -63,6 +63,12 @@ export function createTurn() {
     activity: '',
     // 'starting' while the tool launches, then 'thinking' until text arrives.
     phase: 'starting',
+    // Where the turn is, finer than `phase`, for the activity bar: launching,
+    // opening, sending, waiting, reasoning, tool, writing, finishing. The view
+    // stamps `stageAt` when it changes and `eventAt` on every line.
+    stage: 'launching',
+    stageAt: 0,
+    eventAt: 0,
     sessionId: null,
     model: '',
     error: null,
@@ -70,6 +76,9 @@ export function createTurn() {
     cost: null,
     usage: null,
     items: {},
+    // Codex: MCP servers still starting, and whether the model has the message.
+    starting: {},
+    received: false,
   };
 }
 
@@ -95,13 +104,26 @@ function applyClaude(turn, event) {
         turn.sessionId = event.session_id ?? turn.sessionId;
         turn.model = event.model ?? turn.model;
         turn.phase = 'thinking';
+        turn.stage = 'sending';
         return true;
       }
+      // `requesting`: the CLI has sent the message and waits for the model.
+      if (event.subtype === 'status' && event.status === 'requesting') { turn.stage = 'waiting'; return true; }
       return false;
     case 'stream_event': {
-      const delta = event.event?.type === 'content_block_delta' ? event.event.delta : null;
-      if (delta?.type === 'text_delta') { turn.text += delta.text ?? ''; return true; }
-      if (delta?.type === 'thinking_delta') { turn.thinking += delta.thinking ?? ''; return true; }
+      const inner = event.event ?? {};
+      if (inner.type === 'message_start') { turn.stage = 'waiting'; return true; }
+      if (inner.type === 'message_stop') { turn.stage = 'finishing'; return true; }
+      if (inner.type === 'content_block_start') {
+        const block = inner.content_block?.type;
+        if (block === 'thinking' || block === 'redacted_thinking') turn.stage = 'reasoning';
+        else if (block === 'text') turn.stage = 'writing';
+        else if (block === 'tool_use') { turn.stage = 'tool'; turn.activity = `Using ${inner.content_block.name ?? 'a tool'}`; }
+        return true;
+      }
+      const delta = inner.type === 'content_block_delta' ? inner.delta : null;
+      if (delta?.type === 'text_delta') { turn.text += delta.text ?? ''; turn.stage = 'writing'; return true; }
+      if (delta?.type === 'thinking_delta') { turn.thinking += delta.thinking ?? ''; turn.stage = 'reasoning'; return true; }
       return false;
     }
     case 'assistant': {
@@ -245,6 +267,7 @@ export function parseVersion(stdout) {
 export function codexSession({ prompt, sessionId = null, model = '', cwd = null, connected = false, firstId = 0 }) {
   const turn = createTurn();
   turn.phase = connected ? 'thinking' : 'starting';
+  if (connected) turn.stage = 'opening';
   let nextId = firstId, threadId = null, turnId = null;
   /** @type {Map<number, string>} */
   const pending = new Map();
@@ -291,6 +314,7 @@ export function codexSession({ prompt, sessionId = null, model = '', cwd = null,
           return { write: [], changed: true };
         }
         if (method === 'initialize') {
+          turn.stage = 'opening';
           return {
             write: [JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }), threadRequest()],
             changed: false,
@@ -300,9 +324,13 @@ export function codexSession({ prompt, sessionId = null, model = '', cwd = null,
           threadId = message.result?.thread?.id ?? sessionId;
           turn.sessionId = threadId;
           turn.phase = 'thinking';
+          turn.stage = 'sending';
           return { write: [request('turn/start', { threadId, input: [{ type: 'text', text: prompt, text_elements: [] }] })], changed: false };
         }
-        if (method === 'turn/start') turnId = message.result?.turn?.id ?? turnId;
+        if (method === 'turn/start') {
+          turnId = message.result?.turn?.id ?? turnId;
+          if (turn.stage === 'sending') { turn.stage = 'waiting'; return { write: [], changed: true }; }
+        }
         return { write: [], changed: false };
       }
       const params = message.params ?? {};
@@ -311,28 +339,44 @@ export function codexSession({ prompt, sessionId = null, model = '', cwd = null,
           turn.items[params.itemId] = (turn.items[params.itemId] ?? '') + (params.delta ?? '');
           turn.text = textOf();
           turn.activity = '';
+          turn.stage = 'writing';
           return { write: [], changed: true };
         case 'item/reasoning/summaryTextDelta':
         case 'item/reasoning/textDelta':
           turn.thinking += params.delta ?? '';
+          turn.stage = 'reasoning';
           return { write: [], changed: true };
-        case 'item/started':
-          if (params.item?.type === 'commandExecution') {
-            turn.activity = `Running ${params.item.command ?? 'a command'}`;
-            return { write: [], changed: true };
-          }
+        case 'turn/started':
+          if (turn.stage === 'sending') turn.stage = 'waiting';
+          return { write: [], changed: true };
+        // A new or resumed thread starts the user's MCP servers before the
+        // model sees the message; name them while they start.
+        case 'mcpServer/startupStatus/updated': {
+          if (params.status === 'starting') turn.starting[params.name] = true;
+          else delete turn.starting[params.name];
+          return { write: [], changed: true };
+        }
+        case 'item/started': {
+          const activity = codexActivity(params.item);
+          if (activity) { turn.activity = activity; turn.stage = 'tool'; return { write: [], changed: true }; }
+          if (params.item?.type === 'reasoning') { turn.stage = 'reasoning'; return { write: [], changed: true }; }
+          if (params.item?.type === 'agentMessage') { turn.stage = 'writing'; return { write: [], changed: true }; }
+          if (params.item?.type === 'userMessage') { turn.received = true; turn.stage = 'waiting'; return { write: [], changed: true }; }
           return { write: [], changed: false };
+        }
         case 'item/completed':
           if (params.item?.type === 'agentMessage') {
             turn.items[params.item.id] = params.item.text ?? turn.items[params.item.id] ?? '';
             turn.text = textOf();
+            turn.stage = 'finishing';
             return { write: [], changed: true };
           }
-          if (params.item?.type === 'commandExecution') { turn.activity = ''; return { write: [], changed: true }; }
+          if (codexActivity(params.item)) { turn.activity = ''; turn.stage = 'waiting'; return { write: [], changed: true }; }
+          if (params.item?.type === 'reasoning' && turn.stage === 'reasoning') { turn.stage = 'waiting'; return { write: [], changed: true }; }
           return { write: [], changed: false };
         case 'thread/tokenUsage/updated':
           turn.usage = params.tokenUsage ?? params.usage ?? turn.usage;
-          return { write: [], changed: false };
+          return { write: [], changed: true };
         case 'error':
           if (!params.willRetry) failed(params.error?.message ?? params.message);
           return { write: [], changed: true };
@@ -348,4 +392,86 @@ export function codexSession({ prompt, sessionId = null, model = '', cwd = null,
       }
     },
   };
+}
+
+/** What a Codex item that does something, rather than says something, is doing. */
+function codexActivity(item) {
+  switch (item?.type) {
+    case 'commandExecution': return `Running ${item.command ?? 'a command'}`;
+    case 'webSearch': return item.query ? `Searching the web for ${item.query}` : 'Searching the web';
+    case 'mcpToolCall': return `Calling ${item.tool ?? 'a tool'}${item.server ? ` on ${item.server}` : ''}`;
+    case 'fileChange': return 'Preparing a file change';
+    case 'imageView': return 'Looking at an image';
+    default: return '';
+  }
+}
+
+const words = (text) => (String(text).match(/[\p{L}\p{N}]+/gu) ?? []).reduce((count, word) => count + (/\p{Script=Han}/u.test(word) ? word.length : 1), 0);
+const lastSentence = (text) => {
+  const line = String(text).replace(/\*\*/g, '').trim().split(/\n+/).filter(Boolean).pop() ?? '';
+  return line.length > 140 ? `…${line.slice(-140)}` : line;
+};
+const seconds = (ms) => Math.max(0, Math.floor(ms / 1000));
+
+/**
+ * The activity bar's two lines for a turn in progress: what it is doing now
+ * and what it is waiting for. Both change as the turn moves, so a long wait
+ * reads as work rather than a stall.
+ * @param {ReturnType<typeof createTurn>} turn
+ * @param {{ label: string, model?: string, resuming?: boolean, now: number }} context
+ * @returns {{ label: string, detail: string }}
+ */
+export function describeActivity(turn, { label: name, model = '', resuming = false, now }) {
+  const inStage = seconds(now - (turn.stageAt || now));
+  const quiet = seconds(now - (turn.eventAt || turn.stageAt || now));
+  const who = turn.model || model || name;
+  const still = quiet >= 8 ? `No output for ${quiet} s; ${name} is still working` : '';
+  switch (turn.stage) {
+    case 'launching':
+      return {
+        label: `Starting ${name}`,
+        detail: inStage >= 2 ? `Loading ${name}, your sign-in and settings` : `Launching the ${name.toLowerCase()} command`,
+      };
+    case 'opening':
+      return { label: resuming ? 'Resuming the conversation' : 'Opening a new conversation', detail: `Asking ${name} for a session` };
+    case 'sending':
+    case 'waiting': {
+      const servers = Object.keys(turn.starting ?? {});
+      if (servers.length) return { label: 'Starting tools', detail: `MCP ${servers.length === 1 ? 'server' : 'servers'} ${servers.join(', ')}` };
+      if (turn.stage === 'sending') return { label: 'Sending your message', detail: inStage >= 3 ? `Waiting for ${who} to accept it` : `To ${who}` };
+      return { label: `Waiting for ${who}`, detail: still || (inStage >= 3 || turn.received ? 'The model is reading the conversation' : 'Message sent') };
+    }
+    case 'reasoning':
+      return { label: 'Thinking', detail: lastSentence(turn.thinking) || still || 'Working out an answer' };
+    case 'tool':
+      return { label: turn.activity || 'Using a tool', detail: still || 'Read-only: nothing on disk is changed' };
+    case 'writing': {
+      const count = words(turn.text);
+      return { label: 'Writing the reply', detail: still || `${count} ${count === 1 ? 'word' : 'words'} so far` };
+    }
+    case 'finishing':
+      return { label: 'Wrapping up', detail: 'Saving the session for the next message' };
+    default:
+      return { label: `${name} is working`, detail: still };
+  }
+}
+
+/**
+ * The message that asks a tool to finish a reply it was cut off in. The tail
+ * of what it wrote travels with it: a killed process never saved its partial
+ * reply in the tool's own session.
+ * @param {string} partial
+ * @param {number} [limit]
+ */
+export function continuePrompt(partial, limit = 2000) {
+  const tail = partial.length > limit ? partial.slice(-limit) : partial;
+  return [
+    'Your previous reply to my last message was cut off before it finished. It ended with:',
+    '',
+    '<partial_reply>',
+    tail,
+    '</partial_reply>',
+    '',
+    'Continue from exactly where it stops: start with the next character, do not repeat anything above, and do not mention the interruption.',
+  ].join('\n');
 }

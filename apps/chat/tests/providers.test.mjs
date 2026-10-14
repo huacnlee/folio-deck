@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession } from '../lib/providers.js';
+import { buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession, describeActivity, continuePrompt } from '../lib/providers.js';
 
 const feed = (provider, events) => {
   const turn = createTurn();
@@ -164,4 +164,53 @@ test('codex app-server: a connected session starts with its thread request and i
   const [turnStart] = session.receive(JSON.stringify({ jsonrpc: '2.0', id: 501, result: { thread: { id: 't2' } } })).write.map(JSON.parse);
   assert.equal(turnStart.method, 'turn/start');
   assert.equal(codexSession({ prompt: 'x' }).turn.phase, 'starting');
+});
+
+test('a turn moves through stages the activity bar can name', () => {
+  const turn = createTurn();
+  const at = (stage, events) => { for (const event of events) applyLine('claude', turn, JSON.stringify(event)); assert.equal(turn.stage, stage); };
+  assert.equal(turn.stage, 'launching');
+  at('sending', [{ type: 'system', subtype: 'init', session_id: 's', model: 'claude-opus-5-5' }]);
+  at('waiting', [{ type: 'system', subtype: 'status', status: 'requesting' }, { type: 'stream_event', event: { type: 'message_start' } }]);
+  at('reasoning', [{ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'thinking' } } },
+    { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'First, **list** the cases.\nThen compare them.' } } }]);
+  at('writing', [{ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Three short words 和中文' } } }]);
+  at('finishing', [{ type: 'stream_event', event: { type: 'message_stop' } }]);
+
+  const describe = (stage, extra = {}) => describeActivity({ ...turn, stage, ...extra }, { label: 'Claude', now: 20000, ...extra.context });
+  assert.deepEqual(describe('launching', { stageAt: 19000 }), { label: 'Starting Claude', detail: 'Launching the claude command' });
+  assert.match(describe('launching', { stageAt: 10000 }).detail, /sign-in and settings/);
+  assert.equal(describe('opening', { context: { resuming: true } }).label, 'Resuming the conversation');
+  assert.equal(describe('waiting', { stageAt: 19000, eventAt: 19000 }).label, 'Waiting for claude-opus-5-5');
+  assert.match(describe('waiting', { stageAt: 5000, eventAt: 5000 }).detail, /No output for 15 s/);
+  assert.equal(describe('reasoning').detail, 'Then compare them.');
+  assert.equal(describe('writing', { eventAt: 20000 }).detail, '6 words so far');
+});
+
+test('codex items name what the turn is doing', () => {
+  const session = codexSession({ prompt: 'x', connected: true, firstId: 0 });
+  assert.equal(session.turn.stage, 'opening');
+  const [thread] = session.start().map(JSON.parse);
+  session.receive(JSON.stringify({ jsonrpc: '2.0', id: thread.id, result: { thread: { id: 't' } } }));
+  assert.equal(session.turn.stage, 'sending');
+  const mcp = (status) => session.receive(JSON.stringify({ jsonrpc: '2.0', method: 'mcpServer/startupStatus/updated', params: { name: 'codex_apps', status } }));
+  mcp('starting');
+  assert.deepEqual(describeActivity(session.turn, { label: 'Codex', now: 0 }), { label: 'Starting tools', detail: 'MCP server codex_apps' });
+  mcp('ready');
+  assert.equal(describeActivity(session.turn, { label: 'Codex', now: 0 }).label, 'Sending your message');
+  session.receive(JSON.stringify({ jsonrpc: '2.0', method: 'turn/started', params: {} }));
+  assert.equal(session.turn.stage, 'waiting');
+  session.receive(JSON.stringify({ jsonrpc: '2.0', method: 'item/started', params: { item: { type: 'webSearch', query: 'rust threads' } } }));
+  assert.deepEqual([session.turn.stage, session.turn.activity], ['tool', 'Searching the web for rust threads']);
+  session.receive(JSON.stringify({ jsonrpc: '2.0', method: 'item/completed', params: { item: { type: 'webSearch' } } }));
+  assert.deepEqual([session.turn.stage, session.turn.activity], ['waiting', '']);
+  session.receive(JSON.stringify({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { itemId: 'm', delta: 'Hi' } }));
+  assert.equal(session.turn.stage, 'writing');
+});
+
+test('a cut-off reply is continued from its tail', () => {
+  const prompt = continuePrompt(`${'x'.repeat(3000)}The end of it`, 100);
+  assert.match(prompt, /<partial_reply>\nx+The end of it\n<\/partial_reply>/);
+  assert.ok(!prompt.includes('x'.repeat(101)));
+  assert.match(prompt, /do not repeat/);
 });

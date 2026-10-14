@@ -88,6 +88,10 @@ export function parseStore(text) {
         ...(isText(message.error) && message.error ? { error: message.error } : {}),
         ...(Number.isFinite(message.cost) ? { cost: message.cost } : {}),
         ...(isTime(message.durationMs) ? { durationMs: message.durationMs } : {}),
+        ...(message.pending === true ? { pending: true } : {}),
+        ...(message.interrupted === true ? { interrupted: true } : {}),
+        ...(Number.isInteger(message.resumes) && message.resumes > 0 ? { resumes: message.resumes } : {}),
+        ...(isTime(message.savedAt) ? { savedAt: message.savedAt } : {}),
         at: isTime(message.at) ? message.at : 0,
       }));
     const sessions = {};
@@ -104,6 +108,34 @@ export function parseStore(text) {
     });
   }
   return conversations;
+}
+
+export const RESUME_WINDOW = 120000;
+export const MAX_RESUMES = 2;
+
+/**
+ * Marks the replies that were still being written when the app last stopped
+ * (a reload, a crash, a quit) as interrupted, keeping what they had written.
+ * Returns the conversation to continue on its own: the one whose reply was
+ * saved moments ago, which is a reload rather than a chat left days ago.
+ * @param {object[]} conversations
+ * @param {number} now
+ * @returns {string | null}
+ */
+export function markInterrupted(conversations, now) {
+  let resume = null, newest = 0;
+  for (const conversation of conversations) {
+    const last = conversation.messages[conversation.messages.length - 1];
+    for (const message of conversation.messages) {
+      if (message.role !== 'assistant' || !(message.pending || (!message.text && !message.error))) continue;
+      delete message.pending;
+      message.interrupted = true;
+      message.error = 'The reply was interrupted.';
+      const at = message.savedAt ?? message.at ?? 0;
+      if (message === last && now - at < RESUME_WINDOW && (message.resumes ?? 0) < MAX_RESUMES && at > newest) { resume = conversation.id; newest = at; }
+    }
+  }
+  return resume;
 }
 
 /** "3.2 s", "1 min 4 s" */

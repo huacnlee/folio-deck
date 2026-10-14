@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost } from '../lib/store.js';
+import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost, markInterrupted, RESUME_WINDOW, MAX_RESUMES } from '../lib/store.js';
 
 const DAY = 86400000;
 
@@ -53,4 +53,24 @@ test('durations and costs read naturally', () => {
   assert.equal(formatDuration(64000), '1 min 4 s');
   assert.equal(formatCost(0.02182), '$0.022');
   assert.equal(formatCost(0.0031), '$0.0031');
+});
+
+test('replies cut off mid-stream are marked, and only a fresh one resumes by itself', () => {
+  const now = 1_000_000;
+  const chat = (id, reply) => ({ id, provider: 'claude', messages: [{ id: `${id}-u`, role: 'user', text: 'q', at: 0 }, { id: `${id}-a`, role: 'assistant', id: `${id}-a`, ...reply, text: reply.text }] });
+  const conversations = [
+    chat('old', { text: 'Half of an', pending: true, savedAt: now - RESUME_WINDOW - 1 }),
+    chat('fresh', { text: 'The first part', pending: true, savedAt: now - 5000 }),
+    chat('empty', { text: '', at: now - 1000 }),
+    chat('done', { text: 'Whole.', at: now - 1000 }),
+    chat('tired', { text: 'Again', pending: true, savedAt: now - 10, resumes: MAX_RESUMES }),
+  ];
+  const restored = parseStore(serialize(conversations));
+  const resume = markInterrupted(restored, now);
+  assert.equal(resume, 'empty');
+  const reply = (id) => restored.find((item) => item.id === id).messages[1];
+  assert.deepEqual([reply('fresh').text, reply('fresh').interrupted, reply('fresh').pending], ['The first part', true, undefined]);
+  assert.equal(reply('old').error, 'The reply was interrupted.');
+  assert.equal(reply('done').interrupted, undefined);
+  assert.equal(reply('tired').interrupted, true);
 });

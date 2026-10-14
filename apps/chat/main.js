@@ -6,10 +6,10 @@ import * as fs from 'fs/promises';
 import { randomUUID } from 'crypto';
 import {
   AppFrame, Badge, Button, Card, Chip, EmptyState, IconBadge, IconButton, Kbd, Legend, MenuList, NavItem, NavSection,
-  PageHeader, SearchField, Segmented, SelectTrigger, Sidebar, Steps, Tag, applyTheme, theme,
+  PageHeader, Pulse, ScanLine, SearchField, Segmented, SelectTrigger, Sidebar, Steps, Tag, applyTheme, theme,
 } from 'zion-ui';
-import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession } from './lib/providers.js';
-import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost } from './lib/store.js';
+import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession, describeActivity, continuePrompt } from './lib/providers.js';
+import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost, markInterrupted } from './lib/store.js';
 
 const PREFS = 'chat.preferences.v1';
 const SUGGESTIONS = [
@@ -22,6 +22,9 @@ const SUGGESTIONS = [
 const asset = (name) => `chat/icons/${name}.svg`;
 const icon = (name, size = 14) => svg(asset(name)).size(size).flex_shrink_0();
 const reason = (error) => String(error?.message ?? error).replace(/^Error:\s*/, '');
+const TICK_MS = 450;
+// Timestamps a turn's last output, and the moment its stage changed.
+const stamp = (turn, before) => { const now = Date.now(); turn.eventAt = now; if (turn.stage !== before) turn.stageAt = now; };
 function loadPrefs() { try { return JSON.parse(localStorage.getItem(PREFS) ?? '{}'); } catch { return {}; } }
 function savePrefs(value) { try { localStorage.setItem(PREFS, JSON.stringify(value)); } catch {} }
 
@@ -94,13 +97,13 @@ export default class Chat extends View {
 
   load(cx) {
     cx.spawn(async (cx) => {
+      let resume = null;
       if (this.dataFile) {
         try {
           this.conversations = parseStore(await fs.readFile(this.dataFile, 'utf8'));
-          // A reply still empty on disk was cut off when the app last closed.
-          for (const conversation of this.conversations)
-            for (const message of conversation.messages)
-              if (message.role === 'assistant' && !message.text && !message.error) message.error = 'The reply was interrupted.';
+          // A reply still being written on disk was cut off when the app last
+          // stopped; one cut off moments ago was a reload and carries on.
+          resume = markInterrupted(this.conversations, Date.now());
         }
         catch (error) {
           // A missing file is a first launch; anything else must not be overwritten.
@@ -110,7 +113,11 @@ export default class Chat extends View {
       }
       this.loaded = true;
       if (this.loadError) this.message = { error: true, text: this.loadError };
+      // Reopen the chat that was open, and finish a reply a reload cut off.
+      const open = resume ?? loadPrefs().current;
+      if (open && this.conversations.some((item) => item.id === open)) this.select(open, cx);
       this.prewarm();
+      if (resume && !this.loadError) this.continueReply(cx);
       cx.notify();
     });
   }
@@ -124,7 +131,7 @@ export default class Chat extends View {
       catch (error) { this.message = { error: true, text: `Couldn’t save chats: ${reason(error)}` }; cx.notify(); }
     });
   }
-  persistPrefs() { savePrefs({ provider: this.provider, model: this.model, sidebar: this.sidebar, sidebarWidth: this.sidebarWidth }); }
+  persistPrefs() { savePrefs({ provider: this.provider, model: this.model, sidebar: this.sidebar, sidebarWidth: this.sidebarWidth, current: this.currentId }); }
 
   // ---- conversations -----------------------------------------------------
 
@@ -136,6 +143,7 @@ export default class Chat extends View {
     this.currentId = id;
     this.provider = conversation.provider;
     this.model = conversation.model;
+    this.persistPrefs();
     this.composer.set_value('');
     this.resetScroller(conversation.messages.length);
     this.menu = null;
@@ -143,6 +151,7 @@ export default class Chat extends View {
   }
   newChat(cx) {
     this.currentId = null;
+    this.persistPrefs();
     this.composer.set_value('');
     this.resetScroller(0);
     this.menu = null;
@@ -197,7 +206,27 @@ export default class Chat extends View {
     conversation.model = this.model;
     this.startTurn(conversation, text, history, cx, false);
   }
-  startTurn(conversation, text, history, cx, retried) {
+  /**
+   * Finishes the latest reply where it was cut off: the tool is asked to
+   * carry on from the tail of what it wrote, and its words are appended.
+   */
+  continueReply(cx) {
+    const conversation = this.current();
+    if (!conversation || this.running) return;
+    const last = conversation.messages[conversation.messages.length - 1];
+    if (last?.role !== 'assistant' || !last.interrupted) return;
+    if (!last.text) { this.retry(cx); return; }
+    const userIndex = conversation.messages.map((message) => message.role).lastIndexOf('user');
+    if (userIndex < 0) return;
+    const history = conversation.messages.slice(0, userIndex + 1).filter((message) => !message.error);
+    delete last.error;
+    delete last.interrupted;
+    last.resumes = (last.resumes ?? 0) + 1;
+    conversation.provider = last.provider ?? conversation.provider;
+    this.provider = conversation.provider;
+    this.startTurn(conversation, continuePrompt(last.text), history, cx, false, last);
+  }
+  startTurn(conversation, text, history, cx, retried, resumed = null) {
     const provider = conversation.provider;
     // A session that missed turns answered by the other provider is stale.
     const lastProvider = [...history].reverse().find((message) => message.role === 'assistant')?.provider;
@@ -205,18 +234,25 @@ export default class Chat extends View {
     const sessionId = conversation.sessions[provider] ?? null;
     // Without a session for this provider, earlier messages travel in the prompt.
     const prompt = sessionId ? text : contextPrompt(history, text);
-    const assistant = { id: randomUUID(), role: 'assistant', text: '', provider, ...(conversation.model ? { model: conversation.model } : {}), at: Date.now() };
-    conversation.messages.push(assistant);
-    const run = { conversation, assistant, provider, sessionId, text, history, retried, turn: createTurn(), stderr: [], startedAt: Date.now(), cancel: null, cancelled: false };
+    // A continued reply keeps its message and adds to what it already says.
+    const assistant = resumed ?? { id: randomUUID(), role: 'assistant', text: '', provider, ...(conversation.model ? { model: conversation.model } : {}), at: Date.now() };
+    if (!resumed) conversation.messages.push(assistant);
+    assistant.pending = true;
+    const prefix = resumed ? assistant.text : '';
+    const run = { conversation, assistant, provider, sessionId, text, history, retried, resumed, prefix, turn: createTurn(), stderr: [], startedAt: Date.now(), cancel: null, cancelled: false, tick: 0 };
+    run.turn.stageAt = run.startedAt;
     this.running = run;
     this.resetScroller(conversation.messages.length);
     cx.notify();
     const command = PROVIDERS[provider].command;
     const args = buildArgs(provider, { prompt, sessionId, model: conversation.model });
     const onLine = (line, cx) => {
-      if (this.running !== run || !applyLine(provider, run.turn, line)) return;
-      assistant.text = run.turn.text;
-      this.notifySoon(cx);
+      if (this.running !== run) return;
+      const stage = run.turn.stage;
+      const changed = applyLine(provider, run.turn, line);
+      stamp(run.turn, stage);
+      if (!changed) return;
+      this.progress(run, cx);
     };
     const onExit = (exit, cx) => this.finishTurn(run, exit, cx);
     // Stream when the runtime can; otherwise wait for the whole reply.
@@ -240,12 +276,13 @@ export default class Chat extends View {
         this.finishTurn(run, { code: output.code }, cx);
       });
     }
-    // Redraw often while waiting for the first words, so the thinking shimmer
-    // moves, and once a second after that for the elapsed time.
+    // Advance the activity bar's pulse and scan line a step at a time; the
+    // runtime eases each step natively, so a redraw every TICK_MS is enough
+    // for smooth motion and keeps the elapsed time current.
     cx.spawn(async (cx) => {
       while (this.running === run) {
-        await cx.sleep(run.assistant.text ? 1000 : 90);
-        if (this.running === run) cx.notify();
+        await cx.sleep(TICK_MS);
+        if (this.running === run) { run.tick += 1; cx.notify(); }
       }
     });
   }
@@ -296,13 +333,16 @@ export default class Chat extends View {
     if (server.exited) { this.finishTurn(run, { code: null, error: server.error ?? 'Codex did not start.' }, cx); return; }
     const session = codexSession({ prompt, sessionId: run.sessionId, model: run.conversation.model, cwd: this.workdir, connected: true, firstId: (server.nextId += 1000) });
     run.turn = session.turn;
-    if (!server.ready) session.turn.phase = 'starting';
+    session.turn.stageAt = run.startedAt;
+    if (!server.ready) { session.turn.phase = 'starting'; session.turn.stage = 'launching'; }
     const send = (lines) => lines.forEach((line) => server.write(line));
     const end = (exit, cx) => { server.turn = null; server.onExit = null; this.finishTurn(run, exit, cx); };
     server.turn = (line, cx) => {
+      const stage = session.turn.stage;
       const { write, changed } = session.receive(line);
+      stamp(session.turn, stage);
       send(write);
-      if (changed) { run.assistant.text = session.turn.text; this.notifySoon(cx); }
+      if (changed) this.progress(run, cx);
       if (session.done) end({ code: 0 }, cx);
     };
     // The server ending mid-turn ends the turn with whatever it said last.
@@ -314,8 +354,19 @@ export default class Chat extends View {
       // server with it; the next turn starts a fresh one.
       cx.spawn(async (cx) => { await cx.sleep(1500); if (this.running === run) server.child.kill(); });
     };
-    const start = (cx) => { session.turn.phase = 'thinking'; send(session.start()); this.notifySoon(cx); };
+    const start = (cx) => { session.turn.phase = 'thinking'; session.turn.stage = 'opening'; stamp(session.turn, 'launching'); send(session.start()); this.notifySoon(cx); };
     if (server.ready) start(cx); else server.queue.push(start);
+  }
+  // Output arrived: show it, and keep the session and the words so far on
+  // disk, so a reload or a crash mid-reply can pick the reply up again.
+  progress(run, cx) {
+    const { conversation, assistant, turn, provider } = run;
+    assistant.text = run.prefix + turn.text;
+    let save = false;
+    if (turn.sessionId && conversation.sessions[provider] !== turn.sessionId) { conversation.sessions[provider] = turn.sessionId; save = true; }
+    const now = Date.now();
+    if (save || now - (assistant.savedAt ?? 0) >= 1500) { assistant.savedAt = now; this.save(cx); }
+    this.notifySoon(cx);
   }
   // Coalesce redraws while tokens stream in.
   notifySoon(cx) {
@@ -332,15 +383,16 @@ export default class Chat extends View {
     // A session the tool no longer knows: start a fresh one carrying the history.
     if (error && !turn.text && run.sessionId && !run.retried && /no conversation found|(session|thread)\b.*\b(not found|unknown|does not exist|no such)|no (session|thread|rollout)/i.test(error)) {
       delete conversation.sessions[provider];
-      conversation.messages.pop();
-      this.startTurn(conversation, run.text, run.history, cx, true);
+      if (!run.resumed) conversation.messages.pop();
+      this.startTurn(conversation, run.text, run.history, cx, true, run.resumed);
       return;
     }
-    assistant.text = turn.text;
+    delete assistant.pending;
+    assistant.text = run.prefix + turn.text;
     if (turn.thinking) assistant.thinking = turn.thinking;
     if (turn.model) assistant.model = turn.model;
     if (turn.cost !== null) assistant.cost = turn.cost;
-    assistant.durationMs = Date.now() - run.startedAt;
+    assistant.durationMs = (run.resumed ? assistant.durationMs ?? 0 : 0) + Date.now() - run.startedAt;
     if (error) assistant.error = error;
     conversation.updatedAt = Date.now();
     this.save(cx);
@@ -538,7 +590,7 @@ export default class Chat extends View {
     return MessageScroller.new(`transcript-${conversation.id}`, this.scroller, (index) => {
       const message = conversation.messages[index];
       return message ? this.renderMessage(conversation, message) : null;
-    }).scrollbar(true).flex_1().min_h_0().w_full();
+    }).scrollbar(true).jump_button(false).flex_1().min_h_0().w_full();
   }
   // Transcript rows are laid out by the list, so they hold no handlers and no
   // retained components; they paint with the theme's colors directly.
@@ -561,7 +613,7 @@ export default class Chat extends View {
         .child(parts.join(' · '))
         .when(Boolean(cost), (el) => el.child(div().text_color(c.accent).child(cost))))
       .when(Boolean(waiting), (el) => el.child(v_flex().gap(4)
-        .child(ShimmerText.new(run.turn.activity || (run.turn.phase === 'starting' ? `Starting ${provider.label}…` : 'Thinking…')).id(`shimmer-${message.id}`).text_size(t.type.body))
+        .child(ShimmerText.new(`${this.activityOf(run, Date.now()).label}…`).id(`shimmer-${message.id}`).text_size(t.type.body))
         .when(Boolean(run?.turn.thinking), (el) => el.child(div().text_size(t.type.small).text_color(c.tertiary).whitespace_normal().child(run.turn.thinking.slice(-600))))))
       .when(Boolean(message.text), (el) => el.child(TextView.markdown(`reply-${message.id}`, message.text).selectable(true).w_full().text_size(t.type.body + 1)))
       .when(Boolean(message.error), (el) => el.child(div().text_size(t.type.body).text_color(t.tone('danger').fg).whitespace_normal().child(message.error))));
@@ -575,22 +627,29 @@ export default class Chat extends View {
     return h_flex().w_full().flex_shrink_0().justify_center()
       .child(h_flex().w_full().max_w(760).px(18).gap(2).items_center()
         .when(Boolean(last.text), (el) => el.child(new IconButton('copy-reply').icon(asset(copied ? 'check' : 'copy')).size('sm').description(copied ? 'Copied' : 'Copy reply').onClick((_e, cx) => this.copy(last, cx)).build(cx)))
-        .child(new IconButton('retry-reply').icon(asset('refresh')).size('sm').description('Retry').onClick((_e, cx) => this.retry(cx)).build(cx)));
+        .child(new IconButton('retry-reply').icon(asset('refresh')).size('sm').description('Retry').onClick((_e, cx) => this.retry(cx)).build(cx))
+        .when(Boolean(last.interrupted && last.text), (el) => el.child(new Button('continue-reply').label('Continue').icon(asset('send')).variant('secondary').size('sm')
+          .tooltip('Finish this reply from where it stopped').onClick((_e, cx) => this.continueReply(cx)).build(cx))));
   }
   renderComposer(cx) {
     const t = theme(), c = t.colors, provider = PROVIDERS[this.provider], running = Boolean(this.running);
     const empty = !this.composer.value().trim();
     const model = provider.models.find((item) => item.id === this.model) ?? provider.models[0];
-    let wide = true;
-    try { wide = window.viewport_size().width - (this.sidebar ? this.sidebarWidth : 0) >= 640; } catch {}
+    let wide = true, mainWidth = 800;
+    try { mainWidth = window.viewport_size().width - (this.sidebar ? this.sidebarWidth : 0); wide = mainWidth >= 640; } catch {}
+    // The scan line moves in pixels: the composer column, less its border
+    // and the inset that keeps the bar off the rounded corners.
+    const scanWidth = Math.max(40, Math.min(760, mainWidth - 48) - 2 - 2 * t.radius.card);
     const modelMenu = new MenuList('model-list').width(200).items(provider.models.map((item) => ({
       id: item.id || 'default', label: item.label, checked: item.id === this.model,
       onSelect: (cx) => { this.menu = null; this.setModel(item.id, cx); },
     }))).build(cx);
     return h_flex().w_full().flex_shrink_0().justify_center().px(24).pb(16).pt(8)
       .child(v_flex().w_full().max_w(760).gap(6)
-        .child(v_flex().w_full().rounded(t.radius.card).bg(c.card).border(1).border_color(c.borderStrong)
-          .child(div().w_full().px(14).pt(12).pb(4)
+        .when(running, (el) => el.child(this.renderActivity(wide, cx)))
+        .child(v_flex().w_full().rounded(t.radius.card).overflow_hidden().bg(c.card).border(1).border_color(c.borderStrong)
+          .when(running, (el) => el.child(div().w_full().px(t.radius.card).child(new ScanLine('composer-scan').step(Math.floor(this.running.tick / 2)).period(TICK_MS * 2).width(scanWidth).build(cx))))
+          .child(div().w_full().px(14).pt(running ? 10 : 12).pb(12)
             .child(Textarea.new(this.composer).w_full().text_size(t.type.body + 1).when(Boolean(t.fonts.sans), (el) => el.font_family(t.fonts.sans))))
           .child(h_flex().w_full().min_w_0().px(8).pb(8).gap(6).items_center()
             .child(new Segmented('provider').options(providerIds.map((id) => ({ id, label: PROVIDERS[id].label }))).selected(this.provider)
@@ -599,13 +658,30 @@ export default class Chat extends View {
                 .onClick((_e, cx) => { this.menu = this.menu?.kind === 'model' ? null : { kind: 'model' }; cx.notify(); }).build(cx))
               .anchor('bottom_left').when(this.menu?.kind === 'model', (el) => el.content(modelMenu))))
             .child(div().flex_1().min_w_0())
-            .when(wide, (el) => el.child(new Kbd(running ? 'Esc stops' : 'Enter sends').build(cx)))
+            .when(wide && !running, (el) => el.child(new Kbd('Enter sends').build(cx)))
             .child(running
               ? new Button('stop').label('Stop').icon(asset('stop')).variant('danger').size('sm').disabled(!this.running.cancel)
                 .tooltip(this.running.cancel ? 'Stop (Esc)' : 'Stopping needs process.spawn in gpui-shell').onClick((_e, cx) => this.stop(cx)).build(cx)
               : new Button('send').label('Send').icon(asset('send')).variant('primary').size('sm').disabled(empty || !this.loaded).onClick((_e, cx) => this.send(cx)).build(cx))))
         .child(div().w_full().text_center().text_size(t.type.caption).text_color(c.tertiary)
           .child(`${provider.label} can make mistakes. Chats are saved on this computer.`)));
+  }
+  // What the turn is doing, just above the composer: a pulse that keeps
+  // moving, the phase, and a running clock, so a long wait never looks stuck.
+  renderActivity(wide, cx) {
+    const t = theme(), c = t.colors, run = this.running, now = Date.now();
+    const { label, detail } = this.activityOf(run, now);
+    const clock = (ms) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+    return h_flex().w_full().h(24).px(6).gap(8).items_center()
+      .child(new Pulse('activity-pulse').step(run.tick).period(TICK_MS).build(cx))
+      .child(h_flex().flex_1().min_w_0().gap(8).items_baseline().overflow_hidden()
+        .child(div().flex_shrink_0().max_w('60%').truncate().text_size(t.type.body).text_color(c.bright).child(label))
+        .when(Boolean(detail), (el) => el.child(div().flex_1().min_w_0().truncate().text_size(t.type.small).text_color(c.tertiary).child(detail))))
+      .child(div().flex_shrink_0().font_family(t.fonts.mono).text_size(t.type.small).text_color(c.tertiary).child(clock(now - run.startedAt)))
+      .when(wide, (el) => el.child(new Kbd('Esc stops').build(cx)));
+  }
+  activityOf(run, now) {
+    return describeActivity(run.turn, { label: PROVIDERS[run.provider].label, model: run.conversation.model, resuming: Boolean(run.sessionId), now });
   }
   // A press outside an open menu closes it.
   renderBackdrop(_cx) {
