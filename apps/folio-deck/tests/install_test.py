@@ -1,6 +1,4 @@
 """Exercise the real installer in a disposable tree, without changing HOME/PATH."""
-import hashlib
-import io
 import json
 import plistlib
 import shutil
@@ -25,7 +23,9 @@ esac
 
 class InstallTest(unittest.TestCase):
     def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory(prefix='.installer-', dir=ROOT / 'tests')
+        scratch_dir = Path.home() / '.cache/gpui-shell-benchs-test-tmp'
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        self.scratch = tempfile.TemporaryDirectory(prefix='.installer-', dir=scratch_dir)
         self.root = Path(self.scratch.name)
         self.bin = self.root / '.local/bin'
         self.bin.mkdir(parents=True)
@@ -45,10 +45,19 @@ class InstallTest(unittest.TestCase):
         self.write_executable(self.fake / 'uname', '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n')
         self.write_executable(self.fake / 'xdg-mime', '#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.root / 'mime-call') + '"\n')
         self.write_executable(self.fake / 'update-desktop-database', '#!/bin/sh\nexit 0\n')
+        self.cargo_bin = self.root / 'cargo-bin'
+        self.cargo_bin.mkdir()
+        self.write_executable(self.cargo_bin / 'gpui-shell', RUNTIME)
+        self.write_executable(self.fake / 'cargo', f'''#!/bin/sh
+printf '%s\\n' "$@" >> "{self.root / 'cargo-calls'}"
+[ ! -f "{self.root / 'cargo-fail'}" ]
+''')
         self.script = self.root / 'install.sh'
         source = (ROOT / 'install.sh').read_text().replace('~/', str(self.root) + '/')
-        for name in ['uname', 'xdg-mime', 'update-desktop-database', 'curl']:
+        for name in ['uname', 'xdg-mime', 'update-desktop-database', 'curl', 'cargo']:
             source = source.replace(name + ' ', '"' + str(self.fake / name) + '" ')
+        source = source.replace('${CARGO_HOME:-$HOME/.cargo}/bin/gpui-shell', str(self.cargo_bin / 'gpui-shell'))
+        source = source.replace('node cargo;', 'node "' + str(self.fake / 'cargo') + '";')
         self.script.write_text(source)
         self.write_executable(self.bin / 'gpui-shell', RUNTIME)
 
@@ -89,7 +98,7 @@ class InstallTest(unittest.TestCase):
     def test_invalid_app_keeps_existing_installation(self):
         self.assertEqual(self.run_installer().returncode, 0)
         (self.app / 'main.js').write_text('previous working app')
-        self.write_executable(self.bin / 'gpui-shell', RUNTIME.replace(b'check) test -f', b'check) exit 1; test -f'))
+        self.write_executable(self.cargo_bin / 'gpui-shell', RUNTIME.replace(b'check) test -f', b'check) exit 1; test -f'))
         self.assertNotEqual(self.run_installer().returncode, 0)
         self.assertEqual((self.app / 'main.js').read_text(), 'previous working app')
 
@@ -100,35 +109,6 @@ class InstallTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Refusing to replace', result.stderr)
         self.assertTrue(self.app.is_symlink())
-
-    def prepare_release(self, corrupt=False, target='x86_64-unknown-linux-gnu'):
-        (self.bin / 'gpui-shell').unlink()
-        name = f'gpui-shell-{target}.tar.gz'
-        archive = self.root / name
-        with tarfile.open(archive, 'w:gz') as bundle:
-            info = tarfile.TarInfo(f'gpui-shell-{target}/gpui-shell')
-            info.size = len(RUNTIME)
-            info.mode = 0o755
-            bundle.addfile(info, io.BytesIO(RUNTIME))
-        digest = '0' * 64 if corrupt else hashlib.sha256(archive.read_bytes()).hexdigest()
-        (self.root / (name + '.sha256')).write_text(digest + '  ' + name + '\n')
-        self.write_executable(self.fake / 'curl', f'''#!/bin/sh
-url=''
-output=''
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    https:*) url="$1"; shift ;;
-    -o) output="$2"; shift 2 ;;
-    --retry) shift 2 ;;
-    *) shift ;;
-  esac
-done
-case "$url" in
-  *.sha256) cp "{self.root / (name + '.sha256')}" "$output" ;;
-  *.tar.gz) cp "{archive}" "$output" ;;
-  *) exit 1 ;;
-esac
-''')
 
     def configure_macos(self, arch='arm64'):
         self.write_executable(self.fake / 'uname', f'#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo {arch};; esac\n')
@@ -277,11 +257,11 @@ seal.write_text(json.dumps(files))
         with (bundle / 'Contents/Info.plist').open('rb') as handle:
             self.assertEqual(plistlib.load(handle)['CFBundleIdentifier'], 'com.example.unrelated')
 
-    def test_macos_architectures_download_the_correct_runtime(self):
+    def test_macos_architectures_bundle_cargo_runtime(self):
         for arch, target in [('arm64', 'aarch64-apple-darwin'), ('x86_64', 'x86_64-apple-darwin')]:
             with self.subTest(arch=arch):
                 bundle = self.configure_macos(arch)
-                self.prepare_release(target=target)
+                (self.bin / 'gpui-shell').unlink()
                 result = self.run_installer()
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((bundle / 'Contents/MacOS/gpui-shell').read_bytes(), RUNTIME)
@@ -305,25 +285,24 @@ cp "{archive}" "$output"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.app / 'mailbox.js').is_file())
 
-    def test_unsupported_architecture_fails_before_installing(self):
-        self.write_executable(self.fake / 'uname', '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo aarch64;; esac\n')
-        result = self.run_installer()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('x86_64 only', result.stderr)
-        self.assertFalse(self.app.exists())
+    def test_cargo_updates_runtime_on_every_install(self):
+        updated = RUNTIME.replace(b'0.7.3', b'0.7.4')
+        self.write_executable(self.cargo_bin / 'gpui-shell', updated)
+        for _ in range(2):
+            result = self.run_installer()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((self.bin / 'gpui-shell').read_bytes(), updated)
+        expected = ['install', '--git', 'https://github.com/longbridge/gpui-kit', 'gpui-shell', '--locked']
+        self.assertEqual((self.root / 'cargo-calls').read_text().splitlines(), expected * 2)
 
-    def test_runtime_download_is_verified_before_install(self):
-        self.prepare_release()
-        result = self.run_installer()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.bin / 'gpui-shell').read_bytes(), RUNTIME)
-
-    def test_bad_checksum_installs_neither_runtime_nor_app(self):
-        self.prepare_release(corrupt=True)
-        result = self.run_installer()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.bin / 'gpui-shell').exists())
-        self.assertFalse(self.app.exists())
+    def test_failed_cargo_install_preserves_existing_runtime_and_app(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        (self.app / 'main.js').write_text('previous app')
+        previous = (self.bin / 'gpui-shell').read_bytes()
+        (self.root / 'cargo-fail').touch()
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.bin / 'gpui-shell').read_bytes(), previous)
+        self.assertEqual((self.app / 'main.js').read_text(), 'previous app')
 
 
 if __name__ == '__main__':

@@ -19,21 +19,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$(uname -s)" in
-  Linux) system=linux; target=x86_64-unknown-linux-gnu ;;
-  Darwin)
-    system=macos
-    case "$(uname -m)" in
-      arm64 | aarch64) target=aarch64-apple-darwin ;;
-      x86_64) target=x86_64-apple-darwin ;;
-      *) echo 'Unsupported macOS architecture' >&2; exit 1 ;;
-    esac ;;
+  Linux) system=linux ;;
+  Darwin) system=macos ;;
   *) echo 'Folio Desk supports Linux and macOS.' >&2; exit 1 ;;
 esac
-if [ "$system" = linux ] && [ "$(uname -m)" != x86_64 ]; then
-  echo 'The gpui-shell release currently provides Linux binaries for x86_64 only.' >&2
-  exit 1
-fi
-for utility in curl tar install mktemp node; do
+for utility in curl tar install mktemp node cargo; do
   command -v "$utility" >/dev/null 2>&1 || { echo "Missing dependency: $utility" >&2; exit 1; }
 done
 if [ "$system" = linux ]; then
@@ -56,31 +46,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 shell_path="$bin_dir/gpui-shell"
-current_version=$({ "$shell_path" --version 2>/dev/null || true; } | awk '{print $2}')
-if ! printf '%s\n' "$current_version" | awk -F. 'NF == 3 && ($1 > 0 || $2 > 7 || ($2 == 7 && $3 >= 3)) { found=1 } END {exit !found}'; then
-  asset="gpui-shell-$target.tar.gz"
-  release="https://github.com/longbridge/gpui-kit/releases/download/v0.7.3/$asset"
-  echo 'Installing gpui-shell v0.7.3…'
-  curl --fail --show-error --silent --location --retry 3 "$release" -o "$stage/$asset"
-  curl --fail --show-error --silent --location --retry 3 "$release.sha256" -o "$stage/$asset.sha256"
-  (
-    cd "$stage"
-    if command -v sha256sum >/dev/null 2>&1; then
-      sha256sum -c "$asset.sha256"
-    elif command -v shasum >/dev/null 2>&1; then
-      shasum -a 256 -c "$asset.sha256"
-    else
-      echo 'Missing SHA-256 verifier (sha256sum or shasum).' >&2
-      exit 1
-    fi
-  )
-  tar -xzf "$stage/$asset" -C "$stage"
-  install -m 755 "$stage/gpui-shell-$target/gpui-shell" "$stage/gpui-shell"
-  "$stage/gpui-shell" --version
-  install -m 755 "$stage/gpui-shell" "$shell_path"
-else
-  echo "Using gpui-shell $current_version"
-fi
+# Cargo checks the Git repository on every installation, even when the
+# runtime's version number has not changed. Keep build scratch off /tmp.
+mkdir -p ~/.cache/gpui-shell-install-tmp
+export TMPDIR=~/.cache/gpui-shell-install-tmp
+echo 'Installing the latest gpui-shell from Git…'
+cargo install --git https://github.com/longbridge/gpui-kit gpui-shell --locked
+cargo_shell="${CARGO_HOME:-$HOME/.cargo}/bin/gpui-shell"
+"$cargo_shell" --version
+install -m 755 "$cargo_shell" "$shell_path"
 
 mkdir "$stage/app"
 if [ -n "$app_source" ]; then

@@ -20,8 +20,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev libvulkan1 mesa-vulkan-drivers xvfb
+      - name: Install latest gpui-shell and check application
+        run: |
+          mkdir -p "$HOME/.cache/gpui-shell-test-tmp"
+          export TMPDIR="$HOME/.cache/gpui-shell-test-tmp"
+          cargo install --git https://github.com/longbridge/gpui-kit gpui-shell --locked
+          xvfb-run -a gpui-shell check -d .
       - name: Check shell syntax and installer behavior
         run: |
+          mkdir -p "$HOME/.cache/gpui-shell-test-tmp"
+          export TMPDIR="$HOME/.cache/gpui-shell-test-tmp"
           sh -n install.sh
           node --experimental-vm-modules --test tests/*.test.mjs
           python3 tests/install_test.py
@@ -32,12 +45,13 @@ jobs:
       matrix:
         runner: [macos-14, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
       - name: Test OAuth transport and Gmail logic
         run: node --experimental-vm-modules --test tests/*.test.mjs
       - name: Install and upgrade the complete application
