@@ -2,6 +2,8 @@
 
 A native GPUI disk explorer inspired by the supplied DiskTree reference. Its own light slate shell, pastel nested treemap, and compact selection inspector preserve the useful structure without copying the visual design.
 
+<img width="2080" height="1440" alt="image" src="https://github.com/user-attachments/assets/e6b3e4cf-0aab-44ef-8994-f4b2ba2994d9" />
+
 ## Reference
 
 Inspired by the two DiskTree screenshots supplied by the user; the original source repository was not supplied. The layout and palette are independently implemented, and there is no affiliation with the reference application. See the [benchmark license terms](../../README.md#license).
