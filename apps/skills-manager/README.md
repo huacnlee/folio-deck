@@ -2,7 +2,7 @@
 
 A native desktop manager for agent skills (folders holding a `SKILL.md`), written in JavaScript for [gpui-shell](https://gpui-kit.com/shell/) and rendered with GPUI. It manages the skills your coding agents actually load, and installs new ones from public GitHub repositories.
 
-<img src="screenshot.png" alt="Skills: Discover view" width="1000" />
+<img width="2080" height="1440" alt="image" src="https://github.com/user-attachments/assets/f9624187-797f-4e42-bae9-46438e5e7459" />
 
 ## Reference
 
