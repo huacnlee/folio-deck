@@ -12,7 +12,6 @@ import { typedSignature } from "./handwriting.js";
 import { buildPdf, signedName } from "./pdf.js";
 import { openPdf } from "./pdfparse.js";
 import { signIncrementally } from "./pdfupdate.js";
-import { encodeUtf8, decodeUtf8 } from "./utf8.js";
 
 /** @typedef {import("./items.js").Item} Item */
 /** @typedef {import("./signature.js").Signature} Signature */
@@ -85,7 +84,7 @@ function shapes(model, scale, limit = Infinity) {
 /** FNV-1a over a path, as gpui-shell names a development data directory. */
 function pathDigest(path) {
   let hash = 0xcbf29ce484222325n;
-  for (const byte of encodeUtf8(path)) {
+  for (const byte of new TextEncoder().encode(path)) {
     hash ^= BigInt(byte);
     hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
   }
@@ -530,7 +529,7 @@ export default class Signed extends View {
       let bytes = await this.readAnywhere(path);
       let pdfName = name;
       if (/\.(txt|md|markdown)$/i.test(name)) {
-        const text = decodeUtf8(bytes);
+        const text = new TextDecoder().decode(bytes);
         pdfName = name.replace(/\.[^.]+$/, ".pdf");
         bytes = buildPdf({ title: pdfName, pages: layout(docFromText(pdfName, text)), items: [] });
       }
