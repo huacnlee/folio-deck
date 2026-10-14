@@ -435,7 +435,11 @@ export default class Chat extends View {
       .child(conversation && conversation.messages.length ? this.renderTranscript(conversation, cx) : this.renderWelcome(cx))
       .when(Boolean(conversation?.messages.length), (el) => { const actions = this.renderReplyActions(conversation, cx); return actions ? el.child(actions) : el; })
       .child(this.renderComposer(cx));
+    // Overlays — dialogs, menus — sit beside the frame, not inside it, so the
+    // root carries the font for them to inherit.
+    const sans = theme().fonts.sans;
     return div().id('chat').track_focus(this.focus).key_context('Chat').relative().size_full()
+      .when(Boolean(sans), (el) => el.font_family(sans))
       .on_key_down((event, cx) => this.key(event, cx))
       .child(new AppFrame('chat-frame').sidebar(this.renderSidebar(cx)).main(main).collapsed(!this.sidebar).sidebarWidth(this.sidebarWidth)
         .resizable({ min: 200, max: 380, onResize: (width, cx) => { this.sidebarWidth = width; this.persistPrefs(); cx.notify(); } })
@@ -587,7 +591,7 @@ export default class Chat extends View {
       .child(v_flex().w_full().max_w(760).gap(6)
         .child(v_flex().w_full().rounded(t.radius.card).bg(c.card).border(1).border_color(c.borderStrong)
           .child(div().w_full().px(14).pt(12).pb(4)
-            .child(Textarea.new(this.composer).w_full().text_size(t.type.body + 1)))
+            .child(Textarea.new(this.composer).w_full().text_size(t.type.body + 1).when(Boolean(t.fonts.sans), (el) => el.font_family(t.fonts.sans))))
           .child(h_flex().w_full().min_w_0().px(8).pb(8).gap(6).items_center()
             .child(new Segmented('provider').options(providerIds.map((id) => ({ id, label: PROVIDERS[id].label }))).selected(this.provider)
               .disabled(running).onSelect((id, cx) => this.setProvider(id, cx)).build(cx))
@@ -624,7 +628,7 @@ export default class Chat extends View {
     const title = conversation ? displayTitle(conversation) : '';
     const rename = dialog.kind === 'rename';
     const body = rename
-      ? h_flex().h(32).px(10).items_center().rounded(t.radius.control).bg(t.colors.well).border(1).border_color(t.colors.borderStrong).child(Input.new(this.renameState).flex_1().text_size(t.type.body))
+      ? h_flex().h(32).px(10).items_center().rounded(t.radius.control).bg(t.colors.well).border(1).border_color(t.colors.borderStrong).child(Input.new(this.renameState).flex_1().text_size(t.type.body).when(Boolean(t.fonts.sans), (el) => el.font_family(t.fonts.sans)))
       : div().text_size(t.type.body).text_color(t.colors.secondary).whitespace_normal()
         .child(`The chat is removed from this app. The ${PROVIDERS[conversation?.provider ?? 'claude'].label} session files on disk are kept.`);
     const footer = h_flex().w_full().justify_end().gap(8)
