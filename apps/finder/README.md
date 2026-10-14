@@ -2,6 +2,8 @@
 
 A functional file browser inspired by Omanta and macOS Finder, built entirely with gpui-shell JavaScript and native GPUI elements. The interface follows the Omarchy style: the system monospace font, square corners, hairline dividers, foreground-tinted hover and selection states instead of accent fills, one accent per screen, and the current Omarchy palette with Tokyo Night fallback. There is no browser or Node.js runtime dependency.
 
+<img width="2158" height="1449" alt="image" src="https://github.com/user-attachments/assets/f6bbc381-5e62-4704-843c-ecf69a70ca1c" />
+
 ## Reference
 
 - [28allday/omanta](https://github.com/28allday/omanta): places, tabs, split browsing, file operations and keyboard conventions. This is an independent benchmark implementation, not the original Qt/GIO application.
