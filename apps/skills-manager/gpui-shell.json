@@ -7,15 +7,67 @@
   "capabilities": {
     "storage": true,
     "fs": {
-      "read": ["${dataDir}"],
-      "write": ["${dataDir}"]
+      "read": [
+        "${dataDir}",
+        "${homeDir}/.claude/skills",
+        "${homeDir}/.codex/skills",
+        "${homeDir}/.agents/skills",
+        "${homeDir}/.cursor/skills",
+        "${homeDir}/.gemini/skills",
+        "${homeDir}/.gemini/antigravity/skills",
+        "${homeDir}/.copilot/skills",
+        "${homeDir}/.config/opencode/skills",
+        "${homeDir}/.config/agents/skills",
+        "${homeDir}/.config/goose/skills",
+        "${homeDir}/.continue/skills",
+        "${homeDir}/.roo/skills",
+        "${homeDir}/.kilo/skills",
+        "${homeDir}/.kiro/skills",
+        "${homeDir}/.factory/skills",
+        "${homeDir}/.codeium/windsurf/skills",
+        "${homeDir}/.qwen/skills",
+        "${homeDir}/.trae/skills",
+        "${homeDir}/.openhands/skills",
+        "${homeDir}/.openclaw/skills",
+        "${homeDir}/Downloads",
+        "/usr/share/omarchy/default/agents/skills"
+      ],
+      "write": [
+        "${dataDir}",
+        "${homeDir}/.claude/skills",
+        "${homeDir}/.codex/skills",
+        "${homeDir}/.agents/skills",
+        "${homeDir}/.cursor/skills",
+        "${homeDir}/.gemini/skills",
+        "${homeDir}/.gemini/antigravity/skills",
+        "${homeDir}/.copilot/skills",
+        "${homeDir}/.config/opencode/skills",
+        "${homeDir}/.config/agents/skills",
+        "${homeDir}/.config/goose/skills",
+        "${homeDir}/.continue/skills",
+        "${homeDir}/.roo/skills",
+        "${homeDir}/.kilo/skills",
+        "${homeDir}/.kiro/skills",
+        "${homeDir}/.factory/skills",
+        "${homeDir}/.codeium/windsurf/skills",
+        "${homeDir}/.qwen/skills",
+        "${homeDir}/.trae/skills",
+        "${homeDir}/.openhands/skills",
+        "${homeDir}/.openclaw/skills"
+      ]
     },
     "network": {
       "http": [
         {
           "host": "api.github.com",
-          "methods": ["GET"],
-          "paths": ["/repos/anthropics/skills", "/repos/openai/skills", "/repos/vercel-labs/agent-skills"],
+          "methods": [
+            "GET"
+          ],
+          "paths": [
+            "/repos/anthropics/skills",
+            "/repos/openai/skills",
+            "/repos/vercel-labs/agent-skills"
+          ],
           "path_prefixes": [
             "/repos/anthropics/skills/git/",
             "/repos/openai/skills/git/",
@@ -24,11 +76,20 @@
         },
         {
           "host": "raw.githubusercontent.com",
-          "methods": ["GET"],
-          "path_prefixes": ["/anthropics/skills/", "/openai/skills/", "/vercel-labs/agent-skills/"]
+          "methods": [
+            "GET"
+          ],
+          "path_prefixes": [
+            "/anthropics/skills/",
+            "/openai/skills/",
+            "/vercel-labs/agent-skills/"
+          ]
         }
       ]
     }
   },
-  "window": { "width": 1440, "height": 960 }
+  "window": {
+    "width": 1440,
+    "height": 960
+  }
 }

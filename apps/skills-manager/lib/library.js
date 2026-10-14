@@ -1,24 +1,14 @@
 // @ts-check
-// Everything that reads or changes skills on disk or fetches them from GitHub.
-//
-// gpui-shell 0.7.3 grants `fs` access only inside the application's own
-// directory and its data directory (manifest fs roots elsewhere are replaced at
-// launch), so agent folders are reached through a short allowlist of system
-// commands — `ls`, `stat`, `cat`, `mkdir`, `mv`, `cp`, `ln`, `rm`, `find` —
-// and file contents are written with `fs` into the data directory first, then
-// moved into place. The commands, the data directory writer and fetch are
-// passed in, so `node --test` runs this same code against a temporary folder.
+// Native file operations and GitHub downloads, with injected dependencies for tests.
 
 import { Buffer } from "buffer";
 import { parseFrontmatter, serializeSkill, validateSkillName } from "./frontmatter.js";
 import { skillsInTree, isTextFile } from "./catalog.js";
-import { statArgs, parseStat, resolveLink, normalize, isInside } from "./stat.js";
+import { resolveLink, normalize, isInside } from "./stat.js";
 
 /**
- * @typedef {{ code: number, stdout: string, stderr: string }} RunResult
  * @typedef {{
- *   run: (command: string, args: string[]) => Promise<RunResult>,
- *   platform: string,
+ *   fs: typeof import("fs/promises"),
  *   store: string,
  *   writeStore: (relative: string, contents: string | Uint8Array) => Promise<void>,
  *   fetch: (url: string, options?: any) => Promise<{ ok: boolean, status: number, text(): Promise<string>, json(): Promise<any> }>,
@@ -44,66 +34,91 @@ const parentOf = (path) => normalize(path).split("/").slice(0, -1).join("/") || 
 export const reason = (error) => (error instanceof Error ? error.message : String(error));
 
 // ---------------------------------------------------------------------------
-// Command-backed file operations
+// Native file operations
 // ---------------------------------------------------------------------------
 
-/** Runs a command and throws its stderr when it fails. */
-async function must(/** @type {Deps} */ deps, /** @type {string} */ command, /** @type {string[]} */ args) {
-  const out = await deps.run(command, args);
-  if (out.code !== 0) throw new Error(out.stderr.trim().replace(/^\S+: /, "") || `${command} exited with ${out.code}`);
-  return out;
+function missing(error) {
+  return error?.code === "ENOENT" || /no such file|not found/i.test(reason(error));
 }
 
-/** Whether a path exists. `follow` follows a final link, as reading would. */
-export async function exists(/** @type {Deps} */ deps, /** @type {string} */ path, follow = true) {
-  const out = await deps.run("stat", follow ? ["-L", path] : [path]);
-  return out.code === 0;
-}
-
-/** lstat-style facts about several paths, keyed by path. */
-async function statPaths(/** @type {Deps} */ deps, /** @type {string[]} */ paths, follow = false) {
-  if (paths.length === 0) return new Map();
-  const out = await deps.run("stat", statArgs(deps.platform, paths, { follow }));
-  return parseStat(deps.platform, out.stdout);
-}
-
-/** A folder's entries with their kind, link target and time. */
-export async function list(/** @type {Deps} */ deps, /** @type {string} */ dir) {
-  const out = await deps.run("ls", ["-1A", dir]);
-  if (out.code !== 0) {
-    if (!(await exists(deps, dir))) return [];
-    throw new Error(out.stderr.trim() || `cannot list ${dir}`);
+export async function exists(deps, path, follow = true) {
+  try {
+    await (follow ? deps.fs.stat(path) : deps.fs.lstat(path));
+    return true;
+  } catch (error) {
+    if (missing(error)) return false;
+    throw error;
   }
-  const names = out.stdout.split("\n").filter(Boolean);
+}
+
+async function statPaths(deps, paths, follow = false) {
+  const entries = await Promise.all(paths.map(async (path) => {
+    try {
+      const stat = await (follow ? deps.fs.stat(path) : deps.fs.lstat(path));
+      const kind = stat.isSymbolicLink() ? "link" : stat.isDirectory() ? "dir" : stat.isFile() ? "file" : "other";
+      return [path, { kind, mtime: stat.mtimeMs, target: kind === "link" ? await deps.fs.readlink(path) : "" }];
+    } catch (error) {
+      if (missing(error)) return null;
+      return [path, { kind: "other", mtime: 0, target: "", error: reason(error) }];
+    }
+  }));
+  return new Map(entries.filter(Boolean));
+}
+
+export async function list(deps, dir) {
+  let names;
+  try { names = await deps.fs.readdir(dir); }
+  catch (error) { if (missing(error)) return []; throw error; }
   const stats = await statPaths(deps, names.map((name) => join(dir, name)));
   return names.map((name) => {
     const path = join(dir, name);
     const stat = stats.get(path);
-    return { name, path, kind: stat?.kind ?? "other", target: stat?.target ?? "", mtime: stat?.mtime ?? 0 };
+    return { name, path, kind: stat?.kind ?? "other", target: stat?.target ?? "", mtime: stat?.mtime ?? 0, error: stat?.error ?? null };
   });
 }
 
-/** @param {Deps} deps @param {string} path */
-export async function readText(deps, path) {
-  return (await must(deps, "cat", [path])).stdout;
+export function readText(deps, path) {
+  return deps.fs.readFile(path, "utf8");
 }
 
-/** Moves a file, folder or link; the destination must not exist. */
-async function move(/** @type {Deps} */ deps, /** @type {string} */ from, /** @type {string} */ to) {
+async function move(deps, from, to) {
   if (await exists(deps, to, false)) throw new Error(`${to} already exists.`);
-  await must(deps, "mkdir", ["-p", parentOf(to)]);
-  await must(deps, "mv", [from, to]);
+  await deps.fs.mkdir(parentOf(to), { recursive: true });
+  await deps.fs.rename(from, to);
 }
 
-/**
- * Removes a tree, but only inside the app's own data directory: nothing in an
- * agent folder is ever deleted, only moved to the trash.
- */
-async function removeInStore(/** @type {Deps} */ deps, /** @type {string} */ path) {
+async function removeTree(deps, path) {
+  const stat = await deps.fs.lstat(path);
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    for (const name of await deps.fs.readdir(path)) await removeTree(deps, join(path, name));
+    await deps.fs.rmdir(path);
+  } else await deps.fs.unlink(path);
+}
+
+async function removeInStore(deps, path) {
   if (!deps.store || !isInside(path, deps.store) || normalize(path) === normalize(deps.store)) {
     throw new Error(`refusing to delete ${path} outside the app's data folder`);
   }
-  await must(deps, "rm", ["-rf", path]);
+  // Refuse a symlink in a parent component: confinement must hold on disk too.
+  const parts = normalize(path).slice(normalize(deps.store).length + 1).split("/");
+  let parent = deps.store;
+  for (const part of parts.slice(0, -1)) {
+    parent = join(parent, part);
+    if ((await deps.fs.lstat(parent)).isSymbolicLink()) throw new Error(`refusing to delete through link ${parent}`);
+  }
+  if (await exists(deps, path, false)) await removeTree(deps, path);
+}
+
+async function copyTree(deps, from, to, follow = false) {
+  const stat = await (follow ? deps.fs.stat(from) : deps.fs.lstat(from));
+  if (stat.isSymbolicLink()) throw new Error(`Cannot import nested symbolic link ${from}.`);
+  if (stat.isDirectory()) {
+    await deps.fs.mkdir(to, { recursive: true });
+    for (const name of await deps.fs.readdir(from)) await copyTree(deps, join(from, name), join(to, name));
+  } else if (stat.isFile()) {
+    await deps.fs.mkdir(parentOf(to), { recursive: true });
+    await deps.fs.writeFile(to, await deps.fs.readFile(from));
+  } else throw new Error(`Cannot import special file ${from}.`);
 }
 
 /** Writes files into a fresh staging folder in the data directory. */
@@ -133,7 +148,13 @@ export async function scanRoot(deps, root) {
   /** @type {LocalSkill[]} */
   const skills = [];
   for (const entry of await list(deps, root.path)) {
-    if (entry.name.startsWith(".") || (entry.kind !== "dir" && entry.kind !== "link")) continue;
+    if (entry.name.startsWith(".")) continue;
+    if (entry.error) {
+      skills.push(localSkill({ root, dirName: entry.name, path: entry.path, dir: entry.path, linked: false, target: "" },
+        { enabled: true, error: entry.error }));
+      continue;
+    }
+    if (entry.kind !== "dir" && entry.kind !== "link") continue;
     const linked = entry.kind === "link";
     const dir = linked ? resolveLink(entry.path, entry.target) : entry.path;
     const base = { root, dirName: entry.name, path: entry.path, dir, linked, target: entry.target };
@@ -141,19 +162,16 @@ export async function scanRoot(deps, root) {
     let enabled = true;
     let text = null;
     let error = null;
-    const shown = await deps.run("cat", [join(dir, SKILL_FILE)]);
-    if (shown.code === 0) text = shown.stdout;
-    else {
-      const hidden = await deps.run("cat", [join(dir, DISABLED_FILE)]);
-      if (hidden.code === 0) {
+    try { text = await readText(deps, join(dir, SKILL_FILE)); }
+    catch (shown) {
+      try {
+        text = await readText(deps, join(dir, DISABLED_FILE));
         enabled = false;
-        text = hidden.stdout;
-      } else if (linked && !(await exists(deps, dir))) {
-        error = `Broken link to ${entry.target}.`;
-      } else if (linked && /denied|not permitted/i.test(shown.stderr)) {
-        error = shown.stderr.trim();
-      } else {
-        continue; // A folder that is not a skill.
+      } catch (hidden) {
+        if (linked && missing(shown) && missing(hidden) && !(await exists(deps, dir))) error = `Broken link to ${entry.target}.`;
+        else if (!missing(shown)) error = reason(shown);
+        else if (!missing(hidden)) error = reason(hidden);
+        else continue;
       }
     }
     const data = text == null ? {} : parseFrontmatter(text).data;
@@ -300,8 +318,18 @@ export async function importSkill(deps, source, root) {
   const to = join(root.path, name);
   if (isInside(to, from) || isInside(from, to)) throw new Error("The folder is already in that location.");
   if (await exists(deps, to, false)) throw new Error(`${name} already exists in ${root.label}.`);
-  // -H follows the source if it is itself a link; links inside stay links.
-  await must(deps, "cp", ["-RH", from, to]);
+  const staged = await stage(deps, async (write) => {
+    // Create the staging directory through the same data-directory writer.
+    await write(".import-marker", "");
+  });
+  try {
+    await deps.fs.unlink(join(staged, ".import-marker"));
+    await copyTree(deps, from, staged, true);
+    await move(deps, staged, to);
+  } catch (error) {
+    await removeInStore(deps, staged).catch(() => {});
+    throw error;
+  }
   return to;
 }
 
@@ -348,43 +376,58 @@ async function pool(/** @type {any[]} */ items, /** @type {number} */ limit, /**
 }
 
 /**
- * Lists every skill in the sources: two API calls per repository (its
- * metadata and its file tree), then each SKILL.md from raw.githubusercontent,
- * which does not count against the API's rate limit.
+ * Reads repositories concurrently and publishes cards before descriptions.
+ * Unchanged SKILL.md descriptions are reused by SHA; other downloads use a
+ * bounded pool on raw.githubusercontent.com.
  * @param {Deps} deps @param {Source[]} sources
  * @param {(done: number, total: number) => void} [progress]
+ * @param {(catalog: { skills: RemoteSkill[], errors: { repo: string, message: string }[], fetchedAt: number }) => void} [publish]
+ * @param {RemoteSkill[]} [cached]
  */
-export async function fetchCatalog(deps, sources, progress = () => {}) {
+export async function fetchCatalog(deps, sources, progress = () => {}, publish = () => {}, cached = []) {
   /** @type {RemoteSkill[]} */
   const skills = [];
   /** @type {{ repo: string, message: string }[]} */
   const errors = [];
-  for (const source of sources) {
+  const previous = new Map(cached.map((skill) => [skill.id, skill]));
+  const snapshot = () => publish({ skills: skills.map((skill) => ({ ...skill })), errors: [...errors], fetchedAt: 0 });
+  await Promise.all(sources.map(async (source) => {
     try {
-      const repo = await getJson(deps, `${API}/repos/${source.repo}`);
-      const tree = await getJson(deps, `${API}/repos/${source.repo}/git/trees/${source.branch}?recursive=1`);
+      const [repo, tree] = await Promise.all([
+        getJson(deps, `${API}/repos/${source.repo}`),
+        getJson(deps, `${API}/repos/${source.repo}/git/trees/${source.branch}?recursive=1`),
+      ]);
+      if (tree.truncated) throw new Error("GitHub returned an incomplete repository tree.");
       for (const found of skillsInTree(source, tree.tree ?? [])) {
+        const id = `${source.repo}:${found.dirName}`;
+        const old = previous.get(id);
+        const sha = found.files.find((file) => file.path === SKILL_FILE)?.sha;
+        const unchanged = old?.files.find((file) => file.path === SKILL_FILE)?.sha === sha;
         skills.push({
-          id: `${source.repo}:${found.dirName}`,
-          repo: source.repo,
-          author: source.author,
-          dirName: found.dirName,
-          name: found.dirName,
-          description: "",
-          path: found.path,
-          stars: repo.stargazers_count ?? 0,
-          pushedAt: repo.pushed_at ?? "",
-          files: found.files,
+          id, repo: source.repo, author: source.author, dirName: found.dirName,
+          name: unchanged ? old.name : found.dirName,
+          description: unchanged ? old.description : "",
+          path: found.path, stars: repo.stargazers_count ?? 0,
+          pushedAt: repo.pushed_at ?? "", files: found.files,
         });
       }
+      snapshot();
     } catch (error) {
       errors.push({ repo: source.repo, message: reason(error) });
+      // A temporary failure must not discard a previously loaded source.
+      skills.push(...cached.filter((skill) => skill.repo === source.repo));
+      snapshot();
     }
-  }
+  }));
 
   let done = 0;
-  progress(done, skills.length);
-  await pool(skills, 6, async (skill) => {
+  const pending = skills.filter((skill) => {
+    const old = previous.get(skill.id);
+    return !old?.description || old.description.startsWith("Description unavailable (") ||
+      old.files.find((file) => file.path === SKILL_FILE)?.sha !== skill.files.find((file) => file.path === SKILL_FILE)?.sha;
+  });
+  progress(done, pending.length);
+  await pool(pending, 8, async (skill) => {
     const source = sources.find((s) => s.repo === skill.repo);
     try {
       const { data } = parseFrontmatter(await getText(deps, `${RAW}/${skill.repo}/${source.branch}/${encodePath(skill.path)}/${SKILL_FILE}`));
@@ -393,7 +436,8 @@ export async function fetchCatalog(deps, sources, progress = () => {}) {
     } catch (error) {
       skill.description = `Description unavailable (${reason(error)}).`;
     }
-    progress(++done, skills.length);
+    progress(++done, pending.length);
+    if (done % 4 === 0 || done === pending.length) snapshot();
   });
   return { skills, errors, fetchedAt: deps.now() };
 }
@@ -429,26 +473,4 @@ export async function installRemote(deps, skill, root, sources, progress = () =>
   });
   await move(deps, staged, dest);
   return dest;
-}
-
-/**
- * Finds the absolute path of the app's data directory, which the runtime does
- * not expose: writes a uniquely named marker with `fs` and asks `find` where it
- * landed under gpui-shell's data home.
- * @param {(command: string, args: string[]) => Promise<RunResult>} run
- * @param {(relative: string, contents: string) => Promise<void>} write
- * @param {(relative: string) => Promise<void>} remove
- * @param {string} dataHome
- * @param {string} marker
- */
-export async function locateStore(run, write, remove, dataHome, marker) {
-  await write(marker, "");
-  try {
-    const out = await run("find", [join(dataHome, "gpui-shell/apps"), "-maxdepth", "2", "-name", marker, "-type", "f"]);
-    const found = out.stdout.split("\n").find(Boolean);
-    if (!found) throw new Error(`could not find the app's data folder under ${dataHome}`);
-    return parentOf(found);
-  } finally {
-    await remove(marker).catch(() => {});
-  }
 }

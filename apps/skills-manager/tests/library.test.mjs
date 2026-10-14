@@ -1,27 +1,19 @@
-// Runs the disk operations against a temporary directory through the same
-// system commands the app uses (ls, stat, cat, mkdir, mv, cp, rm, find), never
-// against a real agent folder.
+// Native filesystem operations against disposable folders.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import * as nodeFs from "node:fs/promises";
-import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   scanRoot, setEnabled, trashSkill, listTrash, restoreSkill, deleteForever,
-  createSkill, importSkill, readSkill, fetchCatalog, installRemote, locateStore,
+  createSkill, importSkill, readSkill, fetchCatalog, installRemote,
 } from "../lib/library.js";
 
 let dir;
-const run = (command, args) =>
-  new Promise((resolve) => execFile(command, args, { env: {} }, (error, stdout, stderr) =>
-    resolve({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr })));
-
 let clock = 1_000;
 let counter = 0;
 const deps = (extra = {}) => ({
-  run,
-  platform: process.platform,
+  fs: nodeFs,
   store: join(dir, "store"),
   writeStore: async (relative, contents) => {
     const path = join(dir, "store", relative);
@@ -172,11 +164,73 @@ test("catalog and install against a fake GitHub", async () => {
   assert.deepEqual(await nodeFs.readdir(join(dir, "store/staging")), []);
 });
 
-test("locateStore finds the data folder from a marker", async () => {
-  const home = join(dir, "datahome");
-  const store = join(home, "gpui-shell/apps/skills-manager-0123");
-  await nodeFs.mkdir(store, { recursive: true });
-  const found = await locateStore(run, (rel, c) => nodeFs.writeFile(join(store, rel), c), (rel) => nodeFs.unlink(join(store, rel)), home, ".locate-x");
-  assert.equal(found, store);
-  assert.deepEqual(await nodeFs.readdir(store), []);
+
+test("catalog publishes cards before descriptions and reuses unchanged files", async () => {
+  const source = { repo: "o/fast", branch: "main", prefix: "skills/", author: "O" };
+  let release;
+  let started;
+  const waiting = new Promise((resolve) => { started = resolve; });
+  const description = new Promise((resolve) => { release = resolve; });
+  let rawCalls = 0;
+  const fetch = async (url) => {
+    if (url.includes('raw.githubusercontent.com')) {
+      rawCalls++;
+      started();
+      await description;
+      return { ok: true, text: async () => '---\nname: Quick\ndescription: Cached description\n---\n' };
+    }
+    return { ok: true, json: async () => url.includes('/git/trees/')
+      ? { tree: [{ path: 'skills/quick/SKILL.md', type: 'blob', sha: 'unchanged', size: 50 }] }
+      : { stargazers_count: 1 } };
+  };
+  const snapshots = [];
+  const first = fetchCatalog(deps({ fetch }), [source], undefined, (value) => snapshots.push(value));
+  await waiting;
+  assert.equal(snapshots[0].skills[0].dirName, 'quick');
+  assert.equal(snapshots[0].skills[0].description, '');
+  release();
+  const catalog = await first;
+  assert.equal(catalog.skills[0].description, 'Cached description');
+  const refreshed = await fetchCatalog(deps({ fetch }), [source], undefined, undefined, catalog.skills);
+  assert.equal(rawCalls, 1, 'unchanged descriptions require no raw download');
+  assert.equal(refreshed.skills[0].description, 'Cached description');
+});
+
+test("repository requests run concurrently and a failed source keeps cached cards", async () => {
+  const sources = ['one', 'two'].map((repo) => ({ repo: `o/${repo}`, branch: 'main', prefix: 'skills/', author: repo }));
+  const calls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const cached = [{ id: 'o/two:previous', repo: 'o/two', name: 'previous', dirName: 'previous', description: 'Saved', files: [{ path: 'SKILL.md', sha: 'old' }] }];
+  const fetch = async (url) => {
+    calls.push(url);
+    await gate;
+    if (url.includes('o/two')) throw new Error('offline');
+    return { ok: true, json: async () => ({ tree: [] }) };
+  };
+  const pending = fetchCatalog(deps({ fetch }), sources, undefined, undefined, cached);
+  assert.equal(calls.length, 4, 'both metadata and trees start for both sources');
+  release();
+  const result = await pending;
+  assert.equal(result.skills[0].id, 'o/two:previous');
+  assert.deepEqual(result.errors.map((entry) => entry.repo), ['o/two']);
+});
+
+test("an inaccessible linked entry does not prevent other skills from loading", async () => {
+  const fs = { ...nodeFs, lstat: async (path) => {
+    if (path.endsWith('/shared')) throw new Error('outside every granted read root');
+    return nodeFs.lstat(path);
+  } };
+  const skills = await scanRoot(deps({ fs }), claude());
+  assert.ok(skills.some((skill) => skill.name === 'plain' && !skill.error));
+  assert.match(skills.find((skill) => skill.name === 'shared').error, /granted read root/);
+});
+
+test("nested import links fail without leaving a partial skill", async () => {
+  await nodeFs.mkdir(join(dir, 'imports/with-link'));
+  await nodeFs.writeFile(join(dir, 'imports/with-link/SKILL.md'), '---\nname: with-link\n---\n');
+  await nodeFs.symlink('../pick/SKILL.md', join(dir, 'imports/with-link/linked.md'));
+  await assert.rejects(importSkill(deps(), join(dir, 'imports/with-link'), claude()), /nested symbolic link/);
+  assert.ok(!(await exists(join(dir, 'claude/with-link'))));
+  assert.deepEqual(await nodeFs.readdir(join(dir, 'store/staging')), []);
 });

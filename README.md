@@ -10,8 +10,7 @@ Every application is a self-contained gpui-shell application directory:
 Install the latest runtime from Git (requires Rust/Cargo and the platform's GPUI build dependencies):
 
 ```bash
-mkdir -p ~/.cache/gpui-shell-install-tmp
-TMPDIR=~/.cache/gpui-shell-install-tmp cargo install --git https://github.com/longbridge/gpui-kit gpui-shell --locked
+cargo install --git https://github.com/longbridge/gpui-kit gpui-shell --locked
 ```
 
 Then run an application:
@@ -19,7 +18,7 @@ Then run an application:
 ```bash
 gpui-shell types -d apps/<name>          # write gpui-kit.d.ts (not committed)
 gpui-shell check -d apps/<name>          # load, render and materialize once
-gpui-shell run -d apps/<name> --watch    # run it, reloading on save
+gpui-shell dev apps/<name>               # run it, reloading on save
 ```
 
 ## Applications

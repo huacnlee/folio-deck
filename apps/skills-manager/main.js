@@ -6,7 +6,7 @@ import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { applyTheme, palette } from "./theme.js";
 import { icon, muted, mark, byline, button, iconButton, pill } from "./ui.js";
-import { agentRoots, importRoots, home, dataHome } from "./roots.js";
+import { agentRoots, importRoots, home } from "./roots.js";
 import {
   SOURCES, STATUS_FILTERS, SORTS, groupDiscover, recordFirstSeen, searchSkills, filterLocal,
   sortSkills, truncate, formatBytes, relativeTime,
@@ -14,7 +14,7 @@ import {
 import { tildify } from "./lib/stat.js";
 import {
   scanRoot, readSkill, setEnabled, trashSkill, listTrash, restoreSkill, deleteForever,
-  createSkill, importSkill, fetchCatalog, installRemote, locateStore, reason,
+  createSkill, importSkill, fetchCatalog, installRemote, reason,
 } from "./lib/library.js";
 
 /** @typedef {import("./lib/catalog.js").LocalSkill} LocalSkill */
@@ -25,21 +25,16 @@ const CATALOG_KEY = "skills.catalog.v1";
 const SEEN_KEY = "skills.first-seen.v1";
 const PREFS_KEY = "skills.prefs.v1";
 const CATALOG_TTL = 6 * 60 * 60 * 1000;
-const COLUMNS = 3;
 
-/**
- * What the disk layer runs on. Agent folders are reached through allowlisted
- * commands; contents are written with `fs` into the data directory (the only
- * writable `fs` root), whose absolute path `store` is located at start-up.
- */
+// File operations run inside gpui-shell under the manifest grants.
 const deps = {
-  run: (command, args) => process.run(command, args),
-  platform: process.platform,
-  store: "",
+  fs,
+  store: process.dataDir ?? "",
   writeStore: async (relative, contents) => {
-    const parent = relative.split("/").slice(0, -1).join("/");
+    const absolute = `${deps.store}/${relative}`;
+    const parent = absolute.split("/").slice(0, -1).join("/");
     if (parent) await fs.mkdir(parent, { recursive: true });
-    await fs.writeFile(relative, contents);
+    await fs.writeFile(absolute, contents);
   },
   fetch: (url, options) => fetch(url, options),
   now: () => Date.now(),
@@ -89,7 +84,7 @@ export default class Skills extends View {
     /** "skills" | "trash" | "folders" */
     this.page = "skills";
     /** "installed" | "discover" */
-    this.tab = prefs.tab === "discover" || agentRoots.length === 0 ? "discover" : "installed";
+    this.tab = prefs.tab === "discover" ? "discover" : "installed";
     this.filter = { root: "all", status: "all", repo: "all" };
     this.sort = { installed: prefs.sortInstalled ?? "name", discover: prefs.sortDiscover ?? "rank" };
     this.filterOpen = false;
@@ -105,6 +100,8 @@ export default class Skills extends View {
     this.scanning = false;
     /** @type {string | null} */
     this.scanError = null;
+    this.scanProblemCount = 0;
+    this.noticeDetails = {};
 
     const cached = load(CATALOG_KEY, null);
     /** @type {{ skills: RemoteSkill[], errors: { repo: string, message: string }[], fetchedAt: number } | null} */
@@ -154,16 +151,16 @@ export default class Skills extends View {
         }
       }
       try {
-        if (!deps.store && agentRoots.length) {
-          deps.store = await locateStore(deps.run, (rel, c) => fs.writeFile(rel, c), (rel) => fs.unlink(rel), dataHome, `.locate-${randomUUID()}`);
-        }
         this.trash = await listTrash(deps);
       } catch (error) {
         problems.push(`Data folder: ${reason(error)}`);
       }
       console.info(`scanned ${agentRoots.length} folders: ${found.length} skills, ${this.trash.length} in trash${problems.length ? `; ${problems.join("; ")}` : ""}`);
       this.local = found;
-      this.scanError = problems.length ? problems.join(" · ") : null;
+      const nextError = problems.length ? problems.join(" · ") : null;
+      if (nextError !== this.scanError) this.noticeDetails.scan = false;
+      this.scanError = nextError;
+      this.scanProblemCount = problems.length;
       this.scanning = false;
       cx.notify();
     });
@@ -173,6 +170,7 @@ export default class Skills extends View {
     if (this.fetching) return;
     this.fetching = true;
     this.fetchError = null;
+    this.noticeDetails.fetch = false;
     this.fetchProgress = "Reading repositories…";
     cx.notify();
     cx.spawn(async (cx) => {
@@ -180,7 +178,12 @@ export default class Skills extends View {
         const catalog = await fetchCatalog(deps, SOURCES, (done, total) => {
           this.fetchProgress = `Reading skills ${done} of ${total}…`;
           cx.notify();
-        });
+        }, (partial) => {
+          if (partial.skills.length) {
+            this.catalog = partial;
+            cx.notify();
+          }
+        }, this.catalog?.skills ?? []);
         if (catalog.skills.length === 0 && catalog.errors.length) throw new Error(describeErrors(catalog.errors));
         this.catalog = catalog;
         this.firstSeen = recordFirstSeen(this.firstSeen, catalog.skills.map((s) => s.id), catalog.fetchedAt);
@@ -240,11 +243,7 @@ export default class Skills extends View {
   // Dialogs
   // -------------------------------------------------------------------------
 
-  /**
-   * Dialogs are drawn by this view, over its own content. (`window.open_dialog`
-   * needs gpui-shell's own window root, which this host replaces with
-   * gpui-component's.)
-   */
+  /** Draws the application's dialog over its content. */
   openDialog(state, cx) {
     this.dialog = state;
     this.filterOpen = false;
@@ -301,15 +300,12 @@ export default class Skills extends View {
     return div()
       .relative()
       .size_full()
-      .bg(colors.background)
-      .p(10)
+      .bg(palette.rail)
       .text_color(colors.foreground)
       .child(
         h_flex()
           .size_full()
-          .rounded(14)
-          .border(1)
-          .border_color("#dddddd")
+          .items_stretch()
           .bg(palette.rail)
           .overflow_hidden()
           .child(this.renderRail(cx))
@@ -317,7 +313,7 @@ export default class Skills extends View {
             v_flex()
               .flex_1()
               .min_w_0()
-              .h_full()
+              .min_h_0()
               .my(8)
               .mr(8)
               .rounded(10)
@@ -379,7 +375,7 @@ export default class Skills extends View {
         cx.stop_propagation();
         if (!this.dialog?.busy) this.closeDialog(cx);
       })
-      .child(div().on_mouse_down("left", (_event, cx) => cx.stop_propagation()).child(this.renderDialog(cx)));
+      .child(div().max_w("95%").on_mouse_down("left", (_event, cx) => cx.stop_propagation()).child(this.renderDialog(cx)));
   }
 
   renderRail(cx) {
@@ -461,13 +457,13 @@ export default class Skills extends View {
   pageColumn(cx, title, subtitle, actions) {
     return v_flex()
       .w_full()
-      .max_w(1160)
-      .mx_auto()
-      .px(40)
-      .pt(56)
-      .pb(64)
+      .px(32)
+      .pt(32)
+      .pb(32)
       .child(
         h_flex()
+          .flex_wrap()
+          .gap(16)
           .justify_between()
           .items_start()
           .child(
@@ -476,7 +472,7 @@ export default class Skills extends View {
               .child(div().text_size(20).font_medium().child(title))
               .child(muted(subtitle, cx, 15)),
           )
-          .child(h_flex().gap(10).items_center().children(actions)),
+          .child(h_flex().flex_wrap().gap(10).items_center().children(actions)),
       );
   }
 
@@ -517,6 +513,8 @@ export default class Skills extends View {
     column.child(
       h_flex()
         .mt(28)
+        .flex_wrap()
+        .gap(12)
         .justify_between()
         .items_center()
         .child(
@@ -532,11 +530,17 @@ export default class Skills extends View {
         )
         .child(
           h_flex()
+            .flex_wrap()
+            .flex_grow(1)
+            .flex_basis(440)
+            .min_w_0()
             .gap(10)
             .items_center()
             .child(
               h_flex()
-                .w(280)
+                .flex_grow(1)
+                .flex_basis(200)
+                .min_w_0()
                 .h(32)
                 .px(10)
                 .gap(8)
@@ -558,7 +562,7 @@ export default class Skills extends View {
     if (this.tab === "installed") {
       if (!hasRoots) {
         column.child(this.empty(cx, "folder", "No agent folders are granted to this copy",
-          "Run `node scripts/install.mjs` to install Skills with access to ~/.claude/skills, ~/.codex/skills and ~/.agents/skills. Discover works without it."));
+          "Skills reads ~/.claude/skills, ~/.codex/skills and ~/.agents/skills directly."));
         return column;
       }
       let list = filterLocal(searchSkills(this.local, query), this.filter);
@@ -605,6 +609,7 @@ export default class Skills extends View {
     const notice = (id, iconName, text, action) =>
       h_flex()
         .mt(20)
+        .flex_wrap()
         .gap(10)
         .px(12)
         .py(9)
@@ -615,15 +620,35 @@ export default class Skills extends View {
         .bg(colors.muted)
         .text_size(13)
         .child(div().text_color(colors.muted_foreground).child(icon(iconName, 15)))
-        .child(div().flex_1().min_w_0().child(text))
+        .child(div().flex_grow(1).flex_basis(200).min_w_0().child(text))
         .when(Boolean(action), (el) => el.child(action));
 
-    if (this.tab === "installed" && this.scanError) rows.push(notice("scan", "alert", this.scanError, button("rescan", "Rescan", (cx) => this.rescan(cx), cx, { small: true })));
+    const errorNotice = (id, summary, details, action) => {
+      const expanded = Boolean(this.noticeDetails[id]);
+      return v_flex().child(notice(id, "alert", summary,
+        h_flex().flex_wrap().gap(8).items_center()
+          .child(button(`${id}-details-toggle`, expanded ? "Hide details" : "View details", (cx) => {
+            this.noticeDetails[id] = !expanded;
+            cx.notify();
+          }, cx, { small: true }))
+          .child(action)))
+        .when(expanded, (el) => el.child(v_flex()
+          .id(`${id}-error-details`)
+          .max_h(180)
+          .overflow_y_scrollbar()
+          .px(12).py(10).gap(8)
+          .text_size(12).text_color(colors.muted_foreground)
+          .children(details.map((detail) => div().child(detail)))));
+    };
+
+    if (this.tab === "installed" && this.scanError) rows.push(errorNotice("scan", `${this.scanProblemCount} folder${this.scanProblemCount === 1 ? " is" : "s are"} unavailable. Other folders are shown below.`,
+      this.scanError.split(" · "), button("rescan", "Rescan", (cx) => this.rescan(cx), cx, { small: true })));
     if (this.tab === "discover") {
       if (this.fetching && this.catalog) rows.push(notice("fetch", "refresh", this.fetchProgress, null));
-      else if (this.fetchError && this.catalog) rows.push(notice("fetch-error", "alert", `Could not refresh Discover. ${this.fetchError}`, button("retry", "Retry", (cx) => this.refreshCatalog(cx), cx, { small: true })));
+      else if (this.fetchError && this.catalog) rows.push(errorNotice("fetch", "Could not refresh all Discover sources. Showing available skills.",
+        this.fetchError.split(" · "), button("retry", "Retry", (cx) => this.refreshCatalog(cx), cx, { small: true })));
       else if (this.catalog) rows.push(
-        h_flex().mt(16).gap(6).text_size(12).text_color(colors.muted_foreground)
+        h_flex().mt(16).flex_wrap().gap(6).text_size(12).text_color(colors.muted_foreground)
           .child(`${this.catalog.skills.length} skills from ${SOURCES.map((s) => s.repo).join(", ")} · updated ${relativeTime(this.catalog.fetchedAt)}`)
           .child(Button.new("refresh-link").cursor_pointer().text_color(colors.foreground).hover((s) => s.opacity(0.7))
             .on_click((_e, cx) => this.refreshCatalog(cx)).child("Refresh")),
@@ -632,14 +657,8 @@ export default class Skills extends View {
     return v_flex().children(rows);
   }
 
-  /** A titled section of cards, three to a row. */
+  /** Cards wrap using native layout as the window changes width. */
   group(cx, title, detail, cards) {
-    const rows = [];
-    for (let index = 0; index < cards.length; index += COLUMNS) {
-      const row = cards.slice(index, index + COLUMNS);
-      while (row.length < COLUMNS) row.push(div().flex_1().w(0).min_w_0());
-      rows.push(h_flex().gap(24).items_stretch().children(row));
-    }
     return v_flex()
       .mt(44)
       .gap(24)
@@ -647,10 +666,11 @@ export default class Skills extends View {
         h_flex()
           .gap(10)
           .items_baseline()
+          .flex_wrap()
           .child(muted(title, cx, 15))
           .when(Boolean(detail), (el) => el.child(div().text_size(12).text_color(palette.subtle).child(detail))),
       )
-      .children(rows);
+      .child(h_flex().w_full().flex_wrap().gap(24).items_stretch().children(cards));
   }
 
   /** The shared card frame. */
@@ -658,8 +678,10 @@ export default class Skills extends View {
     const colors = cx.theme().colors;
     return div()
       .id(id)
-      .flex_1()
-      .w(0)
+      .flex_grow(1)
+      .flex_shrink(1)
+      .flex_basis(260)
+      .max_w("100%")
       .min_w_0()
       .h(164)
       .flex()
@@ -713,6 +735,7 @@ export default class Skills extends View {
     if (!skill.enabled && !skill.error) tags.push(pill("Disabled", cx, "warning"));
     const footer = h_flex()
       .gap(8)
+      .flex_wrap()
       .items_center()
       .child(byline(skill.rootLabel, cx, "in"))
       .children(tags)
@@ -778,7 +801,10 @@ export default class Skills extends View {
       .trigger(trigger)
       .content(
         v_flex()
+          .id(`${id}-choices`)
           .w(220)
+          .max_h(360)
+          .overflow_y_scrollbar()
           .mt(6)
           .p(6)
           .rounded(9)
@@ -910,12 +936,12 @@ export default class Skills extends View {
     const list = v_flex().mt(40).rounded(10).border(1).border_color(colors.border).overflow_hidden();
     if (agentRoots.length === 0) {
       list.child(row("alert", "No agent folders granted",
-        "This copy runs from a checkout with only its own data folder. Run `node scripts/install.mjs` to install a copy that may read and write your agent skill folders.",
+        "Check access to the agent folders listed in gpui-shell.json.",
         div()));
     }
     for (const root of agentRoots) {
       const count = this.local.filter((s) => s.rootId === root.id).length;
-      list.child(row("folder", `${root.label}`, `${show(root.path)} · read and write through ls, stat, cat, mkdir, mv and cp`, mark(root.label, 20).when(true, (el) => el)).child(
+      list.child(row("folder", `${root.label}`, `${show(root.path)} · read and write`, mark(root.label, 20).when(true, (el) => el)).child(
         div().w(80).text_right().text_size(13).text_color(colors.muted_foreground).child(`${count} skill${count === 1 ? "" : "s"}`)));
     }
     for (const path of importRoots) list.child(row("import", "Import source", `${show(path)} · read only`, div()));
@@ -923,7 +949,7 @@ export default class Skills extends View {
     list.child(row("compass", "Network", `GET only: api.github.com/repos/… and raw.githubusercontent.com/… for ${SOURCES.map((s) => s.repo).join(", ")}`, div()));
     column.child(list);
     column.child(div().mt(16).text_size(12).text_color(palette.subtle).child(
-      "Disabling renames SKILL.md to SKILL.md.disabled. Uninstalling copies the skill into the trash before removing it; a linked skill is removed as a link and its target is kept."));
+      "Disabling renames SKILL.md to SKILL.md.disabled. Uninstalling moves the skill into the trash; a linked skill is removed as a link and its target is kept."));
     return column;
   }
 
@@ -952,6 +978,7 @@ export default class Skills extends View {
     const colors = cx.theme().colors;
     return v_flex()
       .w(width)
+      .max_w("100%")
       .rounded(12)
       .border(1)
       .border_color(colors.border)
@@ -969,7 +996,7 @@ export default class Skills extends View {
           .child(iconButton("dialog-close", "close", (cx) => this.closeDialog(cx), cx, { size: 28 })),
       )
       .child(v_flex().px(20).py(14).gap(12).child(body))
-      .child(h_flex().px(20).py(14).gap(10).justify_end().border_t(1).border_color(colors.border).bg(colors.secondary).children(footer));
+      .child(h_flex().flex_wrap().px(20).py(14).gap(10).justify_end().border_t(1).border_color(colors.border).bg(colors.secondary).children(footer));
   }
 
   errorLine(text, cx) {
@@ -1058,13 +1085,13 @@ export default class Skills extends View {
   /** Radio rows choosing an agent folder. */
   rootPicker(state, cx, disabledFor = () => "") {
     const colors = cx.theme().colors;
-    if (agentRoots.length === 0) return this.errorLine("No agent folders are granted. Run `node scripts/install.mjs` first.", cx);
-    return h_flex().gap(8).children(agentRoots.map((root) => {
+    if (agentRoots.length === 0) return this.errorLine("No agent folders are granted. Check the file permissions in gpui-shell.json.", cx);
+    return h_flex().id("root-picker").flex_wrap().max_h(200).overflow_y_scrollbar().gap(8).children(agentRoots.map((root) => {
       const reasonText = disabledFor(root);
       const selected = state.root === root.id;
       return div().id(`root-${root.id}`)
-        .flex_1()
-        .w(0)
+        .flex_grow(1)
+        .flex_basis(180)
         .min_w_0()
         .flex()
         .items_center()
