@@ -2,6 +2,8 @@
 
 A desktop chat client in the shape of ChatGPT and Claude Desktop, built entirely with gpui-shell JavaScript and native GPUI elements. It does not call any API itself: every reply comes from the `claude` or `codex` command-line tool already installed and signed in on this computer, so it uses your own subscription, models and configuration. The interface is built from [zion-ui](https://github.com/huacnlee/zion-ui), declared as a Git dependency in `gpui-shell.json`: near-black surfaces, a muted green accent, sans-serif for words and monospace for data. The welcome screen and the sidebar check which of the two tools are installed and show their versions. On a Chinese system the interface font is a CJK family that also draws Latin (Noto Sans CJK SC, or PingFang SC on macOS), because GPUI lowers a mixed line's baseline for a fallback font and Chinese text would otherwise sit low.
 
+<img width="2121" height="1592" alt="image" src="https://github.com/user-attachments/assets/20d66c24-ad48-4138-b301-3949c53e125e" />
+
 ## Reference
 
 - [ChatGPT desktop app](https://openai.com/chatgpt/desktop/) and [Claude Desktop](https://claude.ai/download): a sidebar of chats grouped by date, a centered transcript, and a composer at the bottom with the model choice.
