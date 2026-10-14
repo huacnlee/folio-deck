@@ -1,6 +1,6 @@
 {
-  "id": "com.huacnlee.omanta",
-  "name": "Omanta",
+  "id": "com.huacnlee.finder",
+  "name": "Finder",
   "version": "0.1.0",
   "shell-version": "0.7.3",
   "entry": "main.js",
@@ -14,16 +14,15 @@
       "write": [
         "${homeDir}",
         "${dataDir}",
-        "${pluginDir}/omanta/cache"
+        "${pluginDir}/finder/cache"
       ],
       "execute": [
         "cp",
         "mv",
         "realpath",
-        "xdg-open",
-        "open",
         "rm",
-        "readlink"
+        "readlink",
+        "fc-match"
       ]
     },
     "clipboard": {

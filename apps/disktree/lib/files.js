@@ -215,7 +215,7 @@ export async function transfer(
       if (cut) await moveNoReplace(deps, from, to);
       else {
         // Unique staging is owned by this operation. -P preserves nested symlinks.
-        const staging = join(parent(to), `.omanta-copy-${deps.random()}`);
+        const staging = join(parent(to), `.disktree-copy-${deps.random()}`);
         await deps.fs.mkdir(staging);
         const staged = join(staging, basename(from));
         try {

@@ -2,6 +2,9 @@ export const DEFAULT = {
   background: '#1a1b26', surface: '#24283b', inset: '#13141c', foreground: '#a9b1d6', bright: '#c0caf5',
   accent: '#7aa2f7', selection: '#292e42', border: '#414868', danger: '#f7768e', warning: '#e0af68', success: '#9ece6a',
 };
+export const mix = (a, b, ratio) => '#' + [1, 3, 5].map((offset) => Math.round(
+  parseInt(a.slice(offset, offset + 2), 16) * (1 - ratio) + parseInt(b.slice(offset, offset + 2), 16) * ratio,
+).toString(16).padStart(2, '0')).join('');
 export function parsePalette(text) {
   const values = {};
   for (const line of text.split('\n')) {
@@ -9,9 +12,6 @@ export function parsePalette(text) {
     if (match) values[match[1]] = '#' + match[2].replace(/^#/, '');
   }
   if (!values.background || !values.foreground) throw new Error('Theme needs background and foreground.');
-  const mix = (a, b, ratio) => '#' + [1, 3, 5].map((offset) => Math.round(
-    parseInt(a.slice(offset, offset + 2), 16) * (1 - ratio) + parseInt(b.slice(offset, offset + 2), 16) * ratio,
-  ).toString(16).padStart(2, '0')).join('');
   return {
     ...DEFAULT, ...values,
     surface: values.surface ?? values.lighter_background ?? values.color0 ?? mix(values.background, values.foreground, 0.06),

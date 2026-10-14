@@ -145,7 +145,7 @@ export async function transfer(deps, sources, destination, cut, progress = () =>
       if (cut) await moveNoReplace(deps, from, to);
       else {
         // Unique staging is owned by this operation. -P preserves nested symlinks.
-        const staging = join(parent(to), `.omanta-copy-${deps.random()}`);
+        const staging = join(parent(to), `.finder-copy-${deps.random()}`);
         await deps.fs.mkdir(staging);
         const staged = join(staging, basename(from));
         try {
@@ -223,8 +223,13 @@ export async function preview(fs, entry) {
   if (entry.error) throw new Error(entry.error);
   if (entry.type === 'Image' && !entry.name.toLowerCase().endsWith('.svg') && (entry.size ?? 0) <= 8 * 1024 * 1024) return { kind: 'image', path: entry.path };
   if ((entry.size ?? 0) > 2 * 1024 * 1024) return { kind: 'info', text: 'This file is too large for a text preview. Open it in its default app.' };
-  const allowed = /\.(txt|md|mdx|json|toml|ya?ml|js|mjs|ts|rs|py|css|html|sh|log|csv|ini|cfg|xml|svg)$/i.test(entry.name) || /^(README|LICENSE|Makefile)(\.|$)/i.test(entry.name);
-  if (!allowed) return { kind: 'info', text: 'Open in its default app to view this file.' };
-  const text = await fs.readFile(entry.path, 'utf8');
-  return { kind: 'text', text: text.slice(0, 12000), truncated: text.length > 12000 };
+  // Any small file that is valid UTF-8 without NUL bytes previews as text,
+  // whatever its name: LICENSE-APACHE, flake.lock, .gitignore.
+  const bytes = new Uint8Array(await fs.readFile(entry.path));
+  let text;
+  try {
+    if (bytes.subarray(0, 8192).includes(0)) throw new Error('binary');
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch { return { kind: 'info', text: 'Open in its default app to view this file.' }; }
+  return { kind: /\.mdx?$/i.test(entry.name) ? 'markdown' : 'text', text: text.slice(0, 12000), truncated: text.length > 12000 };
 }

@@ -14,7 +14,7 @@ source = (APP / 'main.js').read_text()
 # never real folders, the user's saved preferences, or an external opener.
 source = source.replace('this.scan(tab, cx);', '')
 source = source.replace('    cx.spawn(async (cx) => {\n      for (;;) {', '    if (false) cx.spawn(async (cx) => {\n      for (;;) {', 1)
-source = source.replace("const PREFS = 'omanta.preferences.v1';", "const PREFS = 'omanta.check.fixture.v1';")
+source = source.replace("const PREFS = 'finder.preferences.v1';", "const PREFS = 'finder.check.fixture.v1';")
 source = source.replace('const prefs = load();', 'const prefs = {};')
 source = source.replace('  persist() { store(', '  persist() { return; store(', 1)
 common = '''
@@ -34,7 +34,7 @@ states = {
     'trash-restore': "this.active().path = '@trash'; this.active().entries[1].id = 'test-record'; this.active().entries[1].originalPath = home + '/notes.md';",
     'text-preview': "this.previewEntry = this.active().entries[1]; this.previewData = { kind: 'text', text: '# Fixture preview', truncated: true };",
 }
-with tempfile.TemporaryDirectory(prefix='omanta-views-', dir=cache) as scratch:
+with tempfile.TemporaryDirectory(prefix='finder-views-', dir=cache) as scratch:
     for name, state in states.items():
         target = Path(scratch) / name
         shutil.copytree(APP, target, ignore=shutil.ignore_patterns('cache', 'tests', 'gpui-kit.d.ts', 'jsconfig.json'))
@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='omanta-views-', dir=cache) as scratch:
         patched = patched.replace('const home = homedir();', 'const home = ' + json.dumps(str(target / 'fixture-home')) + ';')
         (target / 'main.js').write_text(patched)
         manifest = json.loads((target / 'gpui-shell.json').read_text())
-        manifest['id'] = 'com.huacnlee.omanta.check-' + name
+        manifest['id'] = 'com.huacnlee.finder.check-' + name
         manifest['capabilities'] = {'fs': {'read': ['${pluginDir}'], 'write': ['${dataDir}']}}
         (target / 'gpui-shell.json').write_text(json.dumps(manifest))
         subprocess.run(['gpui-shell', 'check', '-d', str(target)], check=True)

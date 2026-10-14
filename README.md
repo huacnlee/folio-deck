@@ -30,7 +30,7 @@ gpui-shell dev apps/<name>               # run it, reloading on save
 | [ocean-view](apps/ocean-view) | OceanView, live fleet tracking: great-circle dead reckoning, sea-lane routing, ETA, fuel burn, rule-based alerts, report export, draggable and zoomable map |
 | [signed](apps/signed) | Signed, a PDF signer: opens real PDFs with a pure-JS parser, keeps a drawn/typed signature library, saves signed copies by incremental update |
 | [skills-manager](apps/skills-manager) | Skills, an agent skills manager: scans, enables, disables, trashes and restores local skills; installs new ones from GitHub |
-| [omanta](apps/omanta) | Omarchy-style file browser: real folders, tabs, split view, previews, copy/move, recoverable trash and undo |
+| [finder](apps/finder) | Finder, an Omarchy-style file browser (first built as Omanta): real folders, tabs, resizable split view, preview pane, right-click menus, pinned Places, copy/move, recoverable trash and undo |
 | [disktree](apps/disktree) | Disk usage treemap: real allocated/apparent sizes, file/age metrics, drill-down, cleanup review and recoverable trash |
 
 ```text
@@ -126,13 +126,13 @@ Time and tokens come from the agents' local transcripts (see [Measuring](#measur
       <td>Done</td>
     </tr>
     <tr>
-      <td><a href="apps/omanta">omanta</a></td>
-      <td>Codex&nbsp;·&nbsp;gpt-6.1-sol</td>
-      <td align="right">33&nbsp;min</td>
-      <td align="right">33&nbsp;min</td>
-      <td align="right">7</td>
-      <td align="right">50.1K</td>
-      <td align="right">13.1M</td>
+      <td><a href="apps/finder">finder</a></td>
+      <td>Codex&nbsp;·&nbsp;gpt-6.1-sol, then Claude&nbsp;Code&nbsp;·&nbsp;claude-opus-5-5</td>
+      <td align="right">98&nbsp;min</td>
+      <td align="right">79&nbsp;min</td>
+      <td align="right">29</td>
+      <td align="right">186.8K</td>
+      <td align="right">57.1M</td>
       <td>Done</td>
     </tr>
     <tr>
@@ -169,14 +169,15 @@ Token counts use K (1,000) and M (1,000,000), rounded to one decimal place; ≈ 
     <tr><td>ocean-view</td><td align="right">4.6K</td><td align="right">455.5K</td><td align="right">45.9M</td><td align="right">154.8K</td><td align="right">46.5M</td></tr>
     <tr><td>signed</td><td align="right">9K</td><td align="right">287.6K</td><td align="right">62.2M</td><td align="right">200.4K</td><td align="right">62.7M</td></tr>
     <tr><td>skills-manager</td><td align="right">5.1K</td><td align="right">289.8K</td><td align="right">48.1M</td><td align="right">147.2K</td><td align="right">48.5M</td></tr>
-    <tr><td>omanta</td><td align="right">442.8K</td><td align="right">0</td><td align="right">12.6M</td><td align="right">50.1K</td><td align="right">13.1M</td></tr>
+    <tr><td>finder</td><td align="right">443.1K</td><td align="right">317.2K</td><td align="right">56.1M</td><td align="right">186.8K</td><td align="right">57.1M</td></tr>
     <tr><td>disktree</td><td align="right">347.4K</td><td align="right">0</td><td align="right">22.7M</td><td align="right">72.2K</td><td align="right">23.1M</td></tr>
   </tbody>
 </table>
 
 Notes:
 
-- **omanta and disktree** were built together on 2026-10-14 with Codex/gpt-6.1-sol. The Omanta row measures the parent phase from the Finder request at 03:00 UTC to the integration snapshot at 03:34 UTC; it includes coordinating DiskTree, an abandoned Lucide browser experiment, and shared validation. All seven human prompts of that phase, including screenshot revisions, are counted in the Omanta row. DiskTree adds two parts: the first build in its own subagent rollout (03:02–03:22 UTC; 13 min, 0 prompts, 2.9M tokens after normalization), and the design and feature rounds that followed in the parent session from 03:44 to the `commit push main` turn ending at 06:35 UTC (75 min active, 30 prompts: home-folder default, treemap colours, gradients and borders, Space marking, breadcrumb and segmented tabs, permanent delete, animation, inspector layout; 290.2K uncached input, 19.9M cache reads, 52.3K output, 20.2M tokens). Wall runs from the subagent's first event to 06:35 UTC; active adds both parts. `session-stats.py` ran against normalized transcript snapshots: parent cumulative token counters subtract the baseline before each phase, and cloned child user messages are excluded. The abandoned Lucide experiment (03:40 UTC) and the later scan-performance and memory fix made in Claude Code are not included.
+- **finder** (first named omanta) **and disktree** were built together on 2026-10-14 with Codex/gpt-6.1-sol. The finder row measures the parent phase from the Finder request at 03:00 UTC to the integration snapshot at 03:34 UTC; it includes coordinating DiskTree, an abandoned Lucide browser experiment, and shared validation. All seven human prompts of that phase, including screenshot revisions, are counted in the finder row. DiskTree adds two parts: the first build in its own subagent rollout (03:02–03:22 UTC; 13 min, 0 prompts, 2.9M tokens after normalization), and the design and feature rounds that followed in the parent session from 03:44 to the `commit push main` turn ending at 06:35 UTC (75 min active, 30 prompts: home-folder default, treemap colours, gradients and borders, Space marking, breadcrumb and segmented tabs, permanent delete, animation, inspector layout; 290.2K uncached input, 19.9M cache reads, 52.3K output, 20.2M tokens). Wall runs from the subagent's first event to 06:35 UTC; active adds both parts. `session-stats.py` ran against normalized transcript snapshots: parent cumulative token counters subtract the baseline before each phase, and cloned child user messages are excluded. The abandoned Lucide experiment (03:40 UTC) and the later scan-performance and memory fix made in Claude Code are not included.
+- **finder** had a second phase in Claude Code (claude-opus-5-5) from 07:14 to 08:19 UTC, measured from that session's transcript with `--from`: 65 min wall, 46 min active, 22 prompts, 280 uncached input, 317.2K cache writes, 43.5M cache reads, 136.7K output, 44.0M tokens. It fixed the collapsed layout and the virtual-list click handlers, then reworked the screen after GPUI Kit and Omarchy design reviews: right-click menus, a preview pane for text, Markdown and images, Omarchy state colours and monospace type, a single-row toolbar, segmented tabs, resizable split panes, pane toggles in the status bar, dragging folders onto Places to pin them, opening files through `cx.open_path`, and the rename from omanta to finder. The two phases ran hours apart, so the row's wall and active times add the two phases instead of spanning the gap. The script counted 23 prompts for the second phase because screenshots read back by the agent appear as user messages; the 22 counted are the author's own, excluding the commit request and one unrelated change to signed (built-in `TextEncoder`/`TextDecoder`), whose small cost is included in the tokens. Known issue at the end of the phase: the auto-collapse of side panes is decided in `render`, which does not rerun on window resize, so a pane can appear only after the next repaint.
 
 - **folio-deck** adds two phases, both Codex with gpt-6.1-sol. Phase 1 (design → demo mail app, before commit `59c1cc1`) is measured: 591 min wall including an overnight pause, 61 min active, 14 prompts, 6.9M tokens. Phase 2 (Gmail, local cache, installer, macOS bundle, about 15 prompts fixing Mail details) has no local transcript; its ≈60 minutes come from the author and its ≈6.8M tokens are scaled from phase 1's rate (≈113K per active minute). Replace the estimate with `session-stats.py` output if the transcript turns up.
 - **tendra** was a standalone repository, [huacnlee/tendra](https://github.com/huacnlee/tendra), imported unchanged. Its session includes about 50 minutes of wrap-up and context compaction after the last commit.

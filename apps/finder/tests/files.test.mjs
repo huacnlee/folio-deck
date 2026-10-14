@@ -11,7 +11,7 @@ const run = (name, args) => new Promise((resolve) => execFile(name, args, (error
 before(async () => {
   const temp = nodeJoin(homedir(), '.cache/gpui-shell-benchs-test-tmp');
   await fs.mkdir(temp, { recursive: true });
-  root = await fs.mkdtemp(nodeJoin(temp, 'omanta-'));
+  root = await fs.mkdtemp(nodeJoin(temp, 'finder-'));
   const home = nodeJoin(root, 'home'), store = nodeJoin(root, 'store');
   await fs.mkdir(home); await fs.mkdir(store);
   deps = { fs, home, store, run, random: randomUUID, now: () => 10000 };
@@ -116,8 +116,14 @@ test('text previews are bounded and binary/large files remain external opens', a
   await fs.writeFile(path, 'x'.repeat(13000));
   const result = await preview(fs, { path, name: 'notes.md', size: 13000, type: 'Document' });
   assert.equal(result.text.length, 12000); assert.equal(result.truncated, true);
+  assert.equal(result.kind, 'markdown');
+  await fs.writeFile(nodeJoin(dir, 'notes.txt'), 'plain');
+  assert.equal((await preview(fs, { path: nodeJoin(dir, 'notes.txt'), name: 'notes.txt', size: 5 })).kind, 'text');
   assert.equal((await preview(fs, { path, name: 'large.txt', size: 3 * 1024 * 1024 })).kind, 'info');
-  assert.equal((await preview(fs, { path, name: 'binary.dat', size: 10 })).kind, 'info');
+  await fs.writeFile(nodeJoin(dir, 'binary.dat'), Uint8Array.from([0x89, 0x50, 0, 0, 0xff]));
+  assert.equal((await preview(fs, { path: nodeJoin(dir, 'binary.dat'), name: 'binary.dat', size: 5 })).kind, 'info');
+  await fs.writeFile(nodeJoin(dir, 'LICENSE-APACHE'), 'Apache License');
+  assert.equal((await preview(fs, { path: nodeJoin(dir, 'LICENSE-APACHE'), name: 'LICENSE-APACHE', size: 14 })).text, 'Apache License');
 });
 
 test('natural sorting does not depend on host Intl and handles long numeric suffixes', () => {
