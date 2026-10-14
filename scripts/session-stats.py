@@ -42,17 +42,34 @@ def read(path, start, end):
     return events
 
 
+# User events the person did not type: harness notices, hook feedback, the
+# summary that continues a compacted session, and images read back by a tool.
+NOT_TYPED = ('<', 'Stop hook feedback:', '[Request interrupted', 'This session is being continued', '[Image: ', 'A session-scoped Stop hook')
+
+
+def typed(content):
+    if isinstance(content, str):
+        return bool(content.strip()) and not content.startswith(NOT_TYPED)
+    if isinstance(content, list):
+        parts = [part for part in content if isinstance(part, dict) and part.get('type') in ('text', 'image')]
+        texts = [str(part.get('text', '')) for part in parts if part.get('type') == 'text']
+        return bool(parts) and not any(text.startswith(NOT_TYPED) for text in texts)
+    return False
+
+
 def claude(events, totals, models):
     usage = {}
     prompts = 0
     for _, event in events:
         message = event.get('message') or {}
         if event.get('type') == 'user' and not event.get('isSidechain') and not event.get('toolUseResult'):
-            content = message.get('content')
-            if isinstance(content, str) and not content.startswith('<'):
+            if typed(message.get('content')):
                 prompts += 1
-            elif isinstance(content, list) and any(part.get('type') in ('text', 'image') and not str(part.get('text', '')).startswith('<') for part in content if isinstance(part, dict) and part.get('type') != 'tool_result'):
-                prompts += 1
+        # A message sent while the agent was working arrives as a queued
+        # command attached to the running turn, not as a user event.
+        attachment = event.get('attachment') or {}
+        if event.get('type') == 'attachment' and not event.get('isSidechain') and attachment.get('type') == 'queued_command' and typed(attachment.get('prompt')):
+            prompts += 1
         if event.get('type') == 'assistant' and message.get('usage'):
             # Streaming writes one line per content block with the same id.
             usage[message.get('id')] = (message.get('model'), message['usage'])

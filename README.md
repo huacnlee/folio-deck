@@ -149,11 +149,11 @@ Time and tokens come from the agents' local transcripts (see [Measuring](#measur
     <tr>
       <td><a href="apps/chat">chat</a></td>
       <td>Claude&nbsp;Code&nbsp;·&nbsp;claude-opus-5-5</td>
-      <td align="right">16&nbsp;min</td>
-      <td align="right">16&nbsp;min</td>
-      <td align="right">2</td>
-      <td align="right">68.6K</td>
-      <td align="right">24.8M</td>
+      <td align="right">151&nbsp;min</td>
+      <td align="right">129&nbsp;min</td>
+      <td align="right">70</td>
+      <td align="right">350.3K</td>
+      <td align="right">182.3M</td>
       <td>Done</td>
     </tr>
   </tbody>
@@ -182,7 +182,7 @@ Token counts use K (1,000) and M (1,000,000), rounded to one decimal place; ≈ 
     <tr><td>skills-manager</td><td align="right">5.1K</td><td align="right">289.8K</td><td align="right">48.1M</td><td align="right">147.2K</td><td align="right">48.5M</td></tr>
     <tr><td>finder</td><td align="right">443.1K</td><td align="right">317.2K</td><td align="right">56.1M</td><td align="right">186.8K</td><td align="right">57.1M</td></tr>
     <tr><td>disktree</td><td align="right">347.4K</td><td align="right">0</td><td align="right">22.7M</td><td align="right">72.2K</td><td align="right">23.1M</td></tr>
-    <tr><td>chat</td><td align="right">98</td><td align="right">96.6K</td><td align="right">24.6M</td><td align="right">68.6K</td><td align="right">24.8M</td></tr>
+    <tr><td>chat</td><td align="right">624</td><td align="right">649.9K</td><td align="right">181.3M</td><td align="right">350.3K</td><td align="right">182.3M</td></tr>
   </tbody>
 </table>
 
@@ -190,7 +190,7 @@ Notes:
 
 - **finder** (first named omanta) **and disktree** were built together on 2026-10-14 with Codex/gpt-6.1-sol. The finder row measures the parent phase from the Finder request at 03:00 UTC to the integration snapshot at 03:34 UTC; it includes coordinating DiskTree, an abandoned Lucide browser experiment, and shared validation. All seven human prompts of that phase, including screenshot revisions, are counted in the finder row. DiskTree adds two parts: the first build in its own subagent rollout (03:02–03:22 UTC; 13 min, 0 prompts, 2.9M tokens after normalization), and the design and feature rounds that followed in the parent session from 03:44 to the `commit push main` turn ending at 06:35 UTC (75 min active, 30 prompts: home-folder default, treemap colours, gradients and borders, Space marking, breadcrumb and segmented tabs, permanent delete, animation, inspector layout; 290.2K uncached input, 19.9M cache reads, 52.3K output, 20.2M tokens). Wall runs from the subagent's first event to 06:35 UTC; active adds both parts. `session-stats.py` ran against normalized transcript snapshots: parent cumulative token counters subtract the baseline before each phase, and cloned child user messages are excluded. The abandoned Lucide experiment (03:40 UTC) and the later scan-performance and memory fix made in Claude Code are not included.
 - **finder** had a second phase in Claude Code (claude-opus-5-5) from 07:14 to 08:19 UTC, measured from that session's transcript with `--from`: 65 min wall, 46 min active, 22 prompts, 280 uncached input, 317.2K cache writes, 43.5M cache reads, 136.7K output, 44.0M tokens. It fixed the collapsed layout and the virtual-list click handlers, then reworked the screen after GPUI Kit and Omarchy design reviews: right-click menus, a preview pane for text, Markdown and images, Omarchy state colours and monospace type, a single-row toolbar, segmented tabs, resizable split panes, pane toggles in the status bar, dragging folders onto Places to pin them, opening files through `cx.open_path`, and the rename from omanta to finder. The two phases ran hours apart, so the row's wall and active times add the two phases instead of spanning the gap. The script counted 23 prompts for the second phase because screenshots read back by the agent appear as user messages; the 22 counted are the author's own, excluding the commit request and one unrelated change to signed (built-in `TextEncoder`/`TextDecoder`), whose small cost is included in the tokens. Known issue at the end of the phase: the auto-collapse of side panes is decided in `render`, which does not rerun on window resize, so a pane can appear only after the next repaint.
-- **chat** was built in the same Claude Code session as finder's second phase, measured with `--from 2026-10-14T08:43:39Z` (the goal was set at 08:43 UTC). The script reports 0 prompts because the request arrived as a `/goal` command; the 2 counted are that goal and a request for a gpui-shell `process.spawn` prompt. The tokens exclude the short `claude -p` and `codex exec` runs used to probe their output formats and to test sessions end to end, which bill to those tools. Streaming and Stop use gpui-shell's `process.spawn`, which landed during the session; the app was written against its proposed API and needed no change when it arrived.
+- **chat** was built in the same Claude Code session as finder's second phase, measured with `--from 2026-10-14T08:43:39Z` (the goal was set at 08:43 UTC) `--to 2026-10-14T11:15:00Z` (the last `commit push`). The session moved to a new transcript file partway through that repeats the earlier events, so only the latest file (`7c3e6285`) is read. The first build took the first 16 minutes; the rest is redesign and feedback rounds: building [zion-ui](https://github.com/huacnlee/zion-ui), the component library the app is drawn with (its name, theme colours and control sizes went through several rounds), centring and sidebar fixes, a resizable animated sidebar, streaming through gpui-shell's new `process.spawn` and a long-lived Codex app server, the read-only sandbox fix for resumed Codex turns, the activity bar for long waits, and continuing replies cut off by a reload. 70 prompts: the `/goal` request plus 69 counted by the script, 54 of them sent while the agent was working (queued commands; the script now counts those and skips hook feedback, interruptions, compaction summaries and images read back by tools). The tokens exclude the short `claude -p` and `codex` runs used to probe their output formats and test sessions and continuations end to end, which bill to those tools.
 
 - **folio-deck** adds two phases, both Codex with gpt-6.1-sol. Phase 1 (design → demo mail app, before commit `59c1cc1`) is measured: 591 min wall including an overnight pause, 61 min active, 14 prompts, 6.9M tokens. Phase 2 (Gmail, local cache, installer, macOS bundle, about 15 prompts fixing Mail details) has no local transcript; its ≈60 minutes come from the author and its ≈6.8M tokens are scaled from phase 1's rate (≈113K per active minute). Replace the estimate with `session-stats.py` output if the transcript turns up.
 - **tendra** was a standalone repository, [huacnlee/tendra](https://github.com/huacnlee/tendra), imported unchanged. Its session includes about 50 minutes of wrap-up and context compaction after the last commit.
@@ -243,7 +243,7 @@ python3 scripts/session-stats.py a.jsonl b.jsonl --from 2026-10-13T06:00:00Z --t
 
 - Claude Code: per-call `usage` is summed after de-duplicating by message `id` (a streamed message is written on several lines).
 - Codex: the cumulative usage of the last `token_count` event; `cached_input_tokens` counts as cache reads, the rest of the input as uncached input, and `reasoning_output_tokens` is already part of the output.
-- Prompts are messages written by a person (including messages that only contain a screenshot), not tool results or injected system content.
+- Prompts are messages written by a person (including messages that only contain a screenshot), not tool results or injected system content. In Claude Code that includes messages sent while the agent was working (queued commands), and excludes hook feedback, interruption notices, the summary that continues a compacted session, and images read back by tools. A `/goal` request is not a user message in the transcript; add it by hand.
 
 ## License
 
