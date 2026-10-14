@@ -28,7 +28,7 @@ export const providerIds = Object.keys(PROVIDERS);
 
 /**
  * Command-line arguments for one turn. Tools are off for Claude and Codex
- * runs read-only, so a chat never edits files. The prompt follows `--` so a
+ * runs read-only on every turn, resumed or new, so a chat never edits files. The prompt follows `--` so a
  * message that starts with `-` is never read as an option.
  * @param {string} provider
  * @param {{ prompt: string, sessionId?: string | null, model?: string }} turn
@@ -44,10 +44,13 @@ export function buildArgs(provider, { prompt, sessionId = null, model = '' }) {
     ];
   }
   if (provider === 'codex') {
-    const options = ['--json', '--skip-git-repo-check', ...(model ? ['-m', model] : [])];
+    // `exec resume` takes no `--sandbox` and otherwise falls back to the user's
+    // config, which may grant full access; the config override pins read-only
+    // for new and resumed turns alike.
+    const options = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', ...(model ? ['-m', model] : [])];
     return sessionId
       ? ['exec', 'resume', ...options, '--', sessionId, prompt]
-      : ['exec', ...options, '--sandbox', 'read-only', '--', prompt];
+      : ['exec', ...options, '--', prompt];
   }
   throw new Error(`Unknown provider: ${provider}`);
 }
@@ -218,4 +221,122 @@ export function contextPrompt(history, prompt, limit = 24000) {
  */
 export function parseVersion(stdout) {
   return /\b(\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?)\b/.exec(String(stdout))?.[1] ?? null;
+}
+
+/**
+ * Codex over `codex app-server`, its JSON-RPC protocol on stdin and stdout.
+ * Unlike `codex exec --json`, which prints a reply only once it is complete,
+ * the app server streams `item/agentMessage/delta` as the reply is written.
+ *
+ * The session is a pure state machine: `start()` gives the first lines to
+ * write, and `receive(line)` folds one line from the server into `turn` and
+ * gives the lines to write in answer. The caller owns the process.
+ *
+ * @param {{ prompt: string, sessionId?: string | null, model?: string, cwd?: string | null }} options
+ */
+export function codexSession({ prompt, sessionId = null, model = '', cwd = null }) {
+  const turn = createTurn();
+  let nextId = 0, threadId = null, turnId = null;
+  /** @type {Map<number, string>} */
+  const pending = new Map();
+  const request = (method, params) => {
+    const id = ++nextId;
+    pending.set(id, method);
+    return JSON.stringify({ jsonrpc: '2.0', id, method, params });
+  };
+  // Every turn is read-only and never asks for approval, new or resumed.
+  const threadParams = { sandbox: 'read-only', approvalPolicy: 'never', ...(cwd ? { cwd } : {}), ...(model ? { model } : {}) };
+  const failed = (message) => { turn.error = String(message || 'Codex reported an error.'); turn.done = true; };
+  const textOf = () => Object.values(turn.items).filter(Boolean).join('\n\n');
+
+  return {
+    turn,
+    get threadId() { return threadId; },
+    get done() { return turn.done; },
+    start() {
+      return [request('initialize', { clientInfo: { name: 'gpui-shell-chat', version: '0.1.0' }, capabilities: null })];
+    },
+    /** A request that stops the running turn, when there is one. */
+    interrupt() {
+      return threadId && turnId && !turn.done ? [request('turn/interrupt', { threadId, turnId })] : [];
+    },
+    /** @param {string} line @returns {{ write: string[], changed: boolean }} */
+    receive(line) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) return { write: [], changed: false };
+      let message;
+      try { message = JSON.parse(trimmed); } catch { return { write: [], changed: false }; }
+      // A request from the server, such as an approval: refuse it so the turn
+      // never waits on a question this client cannot ask.
+      if (message.method && message.id !== undefined) {
+        return { write: [JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Not supported by this client' } })], changed: false };
+      }
+      if (message.id !== undefined) {
+        const method = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) {
+          if (method === 'turn/interrupt') return { write: [], changed: false };
+          failed(message.error.message);
+          return { write: [], changed: true };
+        }
+        if (method === 'initialize') {
+          return {
+            write: [
+              JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }),
+              sessionId ? request('thread/resume', { threadId: sessionId, ...threadParams }) : request('thread/start', threadParams),
+            ],
+            changed: false,
+          };
+        }
+        if (method === 'thread/start' || method === 'thread/resume') {
+          threadId = message.result?.thread?.id ?? sessionId;
+          turn.sessionId = threadId;
+          return { write: [request('turn/start', { threadId, input: [{ type: 'text', text: prompt, text_elements: [] }] })], changed: false };
+        }
+        if (method === 'turn/start') turnId = message.result?.turn?.id ?? turnId;
+        return { write: [], changed: false };
+      }
+      const params = message.params ?? {};
+      switch (message.method) {
+        case 'item/agentMessage/delta':
+          turn.items[params.itemId] = (turn.items[params.itemId] ?? '') + (params.delta ?? '');
+          turn.text = textOf();
+          turn.activity = '';
+          return { write: [], changed: true };
+        case 'item/reasoning/summaryTextDelta':
+        case 'item/reasoning/textDelta':
+          turn.thinking += params.delta ?? '';
+          return { write: [], changed: true };
+        case 'item/started':
+          if (params.item?.type === 'commandExecution') {
+            turn.activity = `Running ${params.item.command ?? 'a command'}`;
+            return { write: [], changed: true };
+          }
+          return { write: [], changed: false };
+        case 'item/completed':
+          if (params.item?.type === 'agentMessage') {
+            turn.items[params.item.id] = params.item.text ?? turn.items[params.item.id] ?? '';
+            turn.text = textOf();
+            return { write: [], changed: true };
+          }
+          if (params.item?.type === 'commandExecution') { turn.activity = ''; return { write: [], changed: true }; }
+          return { write: [], changed: false };
+        case 'thread/tokenUsage/updated':
+          turn.usage = params.tokenUsage ?? params.usage ?? turn.usage;
+          return { write: [], changed: false };
+        case 'error':
+          if (!params.willRetry) failed(params.error?.message ?? params.message);
+          return { write: [], changed: true };
+        case 'turn/completed': {
+          const status = params.turn?.status;
+          if (status === 'failed') failed(params.turn?.error?.message);
+          else if (status === 'interrupted') { turn.done = true; turn.error = turn.error ?? 'Stopped.'; }
+          else turn.done = true;
+          return { write: [], changed: true };
+        }
+        default:
+          return { write: [], changed: false };
+      }
+    },
+  };
 }

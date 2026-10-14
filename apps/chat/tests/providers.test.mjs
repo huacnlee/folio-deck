@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion } from '../lib/providers.js';
+import { buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession } from '../lib/providers.js';
 
 const feed = (provider, events) => {
   const turn = createTurn();
@@ -18,9 +18,12 @@ test('claude arguments disable tools, resume sessions and keep the prompt after 
   assert.ok(!buildArgs('claude', { prompt: 'hi' }).includes('--resume'));
 });
 
-test('codex arguments start read-only and resume by thread id', () => {
-  assert.deepEqual(buildArgs('codex', { prompt: 'hi' }), ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '--', 'hi']);
-  assert.deepEqual(buildArgs('codex', { prompt: 'again', sessionId: 't1' }), ['exec', 'resume', '--json', '--skip-git-repo-check', '--', 't1', 'again']);
+test('codex stays read-only on new and resumed turns, and resumes by thread id', () => {
+  const readOnly = ['-c', 'sandbox_mode="read-only"'];
+  assert.deepEqual(buildArgs('codex', { prompt: 'hi' }), ['exec', '--json', '--skip-git-repo-check', ...readOnly, '--', 'hi']);
+  // `exec resume` has no --sandbox flag; without the override a resumed turn
+  // ran with the user's configured sandbox, which can be full access.
+  assert.deepEqual(buildArgs('codex', { prompt: 'again', sessionId: 't1' }), ['exec', 'resume', '--json', '--skip-git-repo-check', ...readOnly, '--', 't1', 'again']);
   assert.throws(() => buildArgs('other', { prompt: 'x' }));
 });
 
@@ -92,4 +95,58 @@ test('versions come from either tool\'s --version output', () => {
   assert.equal(parseVersion('2.1.296 (Claude Code)\n'), '2.1.296');
   assert.equal(parseVersion('codex-cli 0.162.1\n'), '0.162.1');
   assert.equal(parseVersion('command not found'), null);
+});
+
+const rpc = (value) => JSON.stringify({ jsonrpc: '2.0', ...value });
+
+test('codex app-server: handshake, read-only thread, then the turn', () => {
+  const session = codexSession({ prompt: 'Count to 3', cwd: '/data/workspace' });
+  const [init] = session.start().map(JSON.parse);
+  assert.equal(init.method, 'initialize');
+  const afterInit = session.receive(rpc({ id: init.id, result: {} })).write.map(JSON.parse);
+  assert.deepEqual(afterInit.map((m) => m.method), ['initialized', 'thread/start']);
+  assert.deepEqual(afterInit[1].params, { sandbox: 'read-only', approvalPolicy: 'never', cwd: '/data/workspace' });
+  const [turnStart] = session.receive(rpc({ id: afterInit[1].id, result: { thread: { id: 't1' } } })).write.map(JSON.parse);
+  assert.equal(turnStart.method, 'turn/start');
+  assert.deepEqual(turnStart.params, { threadId: 't1', input: [{ type: 'text', text: 'Count to 3', text_elements: [] }] });
+  assert.equal(session.turn.sessionId, 't1');
+  session.receive(rpc({ id: turnStart.id, result: { turn: { id: 'u1' } } }));
+  assert.equal(JSON.parse(session.interrupt()[0]).method, 'turn/interrupt');
+});
+
+test('codex app-server: deltas stream the reply and turn/completed ends it', () => {
+  const session = codexSession({ prompt: 'x' });
+  session.start();
+  for (const delta of ['1', '\n2', '\n3']) {
+    assert.equal(session.receive(rpc({ method: 'item/agentMessage/delta', params: { itemId: 'm1', delta } })).changed, true);
+  }
+  assert.equal(session.turn.text, '1\n2\n3');
+  session.receive(rpc({ method: 'item/reasoning/summaryTextDelta', params: { delta: 'Counting.' } }));
+  assert.equal(session.turn.thinking, 'Counting.');
+  session.receive(rpc({ method: 'item/started', params: { item: { type: 'commandExecution', command: 'ls' } } }));
+  assert.equal(session.turn.activity, 'Running ls');
+  session.receive(rpc({ method: 'turn/completed', params: { turn: { status: 'completed' } } }));
+  assert.equal(session.done, true);
+  assert.equal(session.turn.error, null);
+});
+
+test('codex app-server: resumes by thread id, refuses server requests, reports failures', () => {
+  const session = codexSession({ prompt: 'again', sessionId: 't9' });
+  const [init] = session.start().map(JSON.parse);
+  const [, resume] = session.receive(rpc({ id: init.id, result: {} })).write.map(JSON.parse);
+  assert.equal(resume.method, 'thread/resume');
+  assert.equal(resume.params.threadId, 't9');
+  assert.equal(resume.params.sandbox, 'read-only');
+  const [answer] = session.receive(rpc({ id: 77, method: 'item/commandExecution/requestApproval', params: {} })).write.map(JSON.parse);
+  assert.equal(answer.id, 77);
+  assert.ok(answer.error);
+  session.receive(rpc({ id: resume.id, error: { message: 'no rollout found for thread id t9' } }));
+  assert.equal(session.done, true);
+  assert.match(session.turn.error, /no rollout found/);
+  const interrupted = codexSession({ prompt: 'x' });
+  interrupted.receive(rpc({ method: 'turn/completed', params: { turn: { status: 'interrupted' } } }));
+  assert.equal(interrupted.turn.error, 'Stopped.');
+  const retried = codexSession({ prompt: 'x' });
+  retried.receive(rpc({ method: 'error', params: { error: { message: 'busy' }, willRetry: true } }));
+  assert.equal(retried.turn.error, null);
 });

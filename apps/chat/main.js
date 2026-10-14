@@ -8,7 +8,7 @@ import {
   AppFrame, Badge, Button, Card, Chip, EmptyState, IconBadge, IconButton, Kbd, Legend, MenuList, NavItem, NavSection,
   PageHeader, SearchField, Segmented, SelectTrigger, Sidebar, Steps, Tag, applyTheme, theme,
 } from 'zion-ui';
-import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion } from './lib/providers.js';
+import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession } from './lib/providers.js';
 import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost } from './lib/store.js';
 
 const PREFS = 'chat.preferences.v1';
@@ -40,6 +40,7 @@ export default class Chat extends View {
     this.provider = providerIds.includes(prefs.provider) ? prefs.provider : 'claude';
     this.model = typeof prefs.model === 'string' ? prefs.model : '';
     this.sidebar = prefs.sidebar !== false;
+    this.sidebarWidth = Number.isFinite(prefs.sidebarWidth) ? prefs.sidebarWidth : 248;
     this.running = null;
     this.message = null;
     this.dialog = null;
@@ -51,10 +52,12 @@ export default class Chat extends View {
     this.scroller = MessageScrollerState.new(0);
     this.dataFile = process.dataDir ? `${process.dataDir}/conversations.json` : null;
     this.workdir = process.dataDir ? `${process.dataDir}/workspace` : null;
-    this.composer = TextareaState.new({ placeholder: this.placeholder(), rows: 1 });
+    this.composer = TextareaState.new({ placeholder: 'Ask anything…', rows: 1 });
     this.composer.set_auto_grow(1, 8);
     this.composer.on('change', (_event, cx) => cx.notify());
-    this.composer.on('submit', (event, cx) => { if (event.secondary) this.send(cx); });
+    // Enter sends and Shift + Enter adds a line. The textarea reports Enter
+    // after it has inserted the newline, which send() trims away.
+    this.composer.on('submit', (event, cx) => { if (!event.shift) this.send(cx); });
     this.search = InputState.new({ placeholder: 'Search chats' });
     this.search.on('change', (_event, cx) => cx.notify());
     this.renameState = InputState.new({ placeholder: 'Chat name' });
@@ -108,12 +111,11 @@ export default class Chat extends View {
       catch (error) { this.message = { error: true, text: `Couldn’t save chats: ${reason(error)}` }; cx.notify(); }
     });
   }
-  persistPrefs() { savePrefs({ provider: this.provider, model: this.model, sidebar: this.sidebar }); }
+  persistPrefs() { savePrefs({ provider: this.provider, model: this.model, sidebar: this.sidebar, sidebarWidth: this.sidebarWidth }); }
 
   // ---- conversations -----------------------------------------------------
 
   current() { return this.conversations.find((conversation) => conversation.id === this.currentId) ?? null; }
-  placeholder() { return `Message ${PROVIDERS[this.provider].label}…`; }
   resetScroller(count) { this.scroller = MessageScrollerState.new(count); }
   select(id, cx) {
     const conversation = this.conversations.find((item) => item.id === id);
@@ -200,7 +202,30 @@ export default class Chat extends View {
     };
     const onExit = (exit, cx) => this.finishTurn(run, exit, cx);
     // Stream when the runtime can; otherwise wait for the whole reply.
-    if (typeof process.spawn === 'function') {
+    if (typeof process.spawn === 'function' && provider === 'codex') {
+      // `codex exec --json` prints a reply only once it is whole; the app
+      // server streams it as it is written.
+      const session = codexSession({ prompt, sessionId, model: conversation.model, cwd: this.workdir });
+      run.turn = session.turn;
+      try {
+        const child = process.spawn(command, ['app-server', '-c', 'sandbox_mode="read-only"'], { lines: true, stdin: 'pipe', ...(this.workdir ? { cwd: this.workdir } : {}) });
+        const send = (lines) => { for (const line of lines) child.write(`${line}\n`); };
+        child.on('stdout', (line, cx) => {
+          if (this.running !== run) return;
+          const { write, changed } = session.receive(line);
+          send(write);
+          if (changed) { assistant.text = session.turn.text; this.notifySoon(cx); }
+          if (session.done) child.kill();
+        }).on('stderr', (line) => { run.stderr.push(line); }).on('exit', onExit);
+        send(session.start());
+        run.cancel = () => {
+          const lines = session.interrupt();
+          if (lines.length) send(lines); else child.kill();
+          // A turn that does not acknowledge the interrupt promptly is ended.
+          cx.spawn(async (cx) => { await cx.sleep(1500); if (this.running === run) child.kill(); });
+        };
+      } catch (error) { this.finishTurn(run, { code: null, error: reason(error) }, cx); }
+    } else if (typeof process.spawn === 'function') {
       try {
         const child = process.spawn(command, args, { lines: true, stdin: 'null', ...(this.workdir ? { cwd: this.workdir } : {}) });
         child.on('stdout', onLine).on('stderr', (line) => { run.stderr.push(line); }).on('exit', onExit);
@@ -328,14 +353,6 @@ export default class Chat extends View {
     else if (ctrl && key === 'b') { this.sidebar = !this.sidebar; this.persistPrefs(); cx.notify(); cx.stop_propagation(); }
     else if (key === 'escape' && this.running) this.stop(cx);
   }
-  composerKey(event, cx) {
-    const key = event.key.toLowerCase();
-    if (key !== 'enter' || event.modifiers.shift || event.modifiers.alt) return;
-    // Enter sends; Shift + Enter falls through to the textarea as a newline.
-    cx.stop_propagation();
-    this.send(cx);
-  }
-
   // ---- rendering ---------------------------------------------------------
 
   render(cx) {
@@ -348,7 +365,9 @@ export default class Chat extends View {
       .child(this.renderComposer(cx));
     return div().id('chat').track_focus(this.focus).key_context('Chat').relative().size_full()
       .on_key_down((event, cx) => this.key(event, cx))
-      .child(new AppFrame('chat-frame').sidebar(this.sidebar ? this.renderSidebar(cx) : null).main(main).build(cx))
+      .child(new AppFrame('chat-frame').sidebar(this.renderSidebar(cx)).main(main).collapsed(!this.sidebar).sidebarWidth(this.sidebarWidth)
+        .resizable({ min: 200, max: 380, onResize: (width, cx) => { this.sidebarWidth = width; this.persistPrefs(); cx.notify(); } })
+        .build(cx))
       .when(Boolean(this.dialog), (el) => el.child(this.renderDialog(cx)))
       .when(Boolean(this.menu && this.menu.kind !== 'model'), (el) => el.child(this.renderMenu(cx)))
       .when(this.menu?.kind === 'model', (el) => el.child(this.renderBackdrop(cx)));
@@ -386,18 +405,15 @@ export default class Chat extends View {
     const provider = PROVIDERS[this.provider];
     const model = provider.models.find((item) => item.id === this.model) ?? provider.models[0];
     const busy = Boolean(this.running && this.running.conversation === conversation);
-    const actions = [];
-    if (conversation) {
-      actions.push(
-        new IconButton('rename-chat').icon(asset('edit')).description('Rename chat').onClick((_e, cx) => this.askRename(conversation.id, cx)).build(cx),
-        new IconButton('delete-chat').icon(asset('trash')).description('Delete chat…').disabled(busy).onClick((_e, cx) => this.askDelete(conversation.id, cx)).build(cx),
-      );
-    }
-    actions.push(new IconButton('toggle-sidebar').icon(asset('panel-left')).selected(this.sidebar)
-      .description(this.sidebar ? 'Hide sidebar (Ctrl + B)' : 'Show sidebar (Ctrl + B)')
-      .onClick((_e, cx) => { this.sidebar = !this.sidebar; this.persistPrefs(); cx.notify(); }).build(cx));
+    const actions = conversation ? [
+      new IconButton('rename-chat').icon(asset('edit')).description('Rename chat').onClick((_e, cx) => this.askRename(conversation.id, cx)).build(cx),
+      new IconButton('delete-chat').icon(asset('trash')).description('Delete chat…').disabled(busy).onClick((_e, cx) => this.askDelete(conversation.id, cx)).build(cx),
+    ] : [];
     const count = conversation ? conversation.messages.length : 0;
-    const header = new PageHeader(conversation ? displayTitle(conversation) : 'New chat')
+    const header = new PageHeader(conversation ? displayTitle(conversation) : 'New chat').compact()
+      .leading(new IconButton('toggle-sidebar').icon(asset('panel-left')).selected(this.sidebar)
+        .description(this.sidebar ? 'Hide sidebar (Ctrl + B)' : 'Show sidebar (Ctrl + B)')
+        .onClick((_e, cx) => { this.sidebar = !this.sidebar; this.persistPrefs(); cx.notify(); }).build(cx))
       .breadcrumb([provider.label, model.id || 'default model'])
       .badge(new Badge(busy ? 'Replying' : 'Ready').tone(busy ? 'accent' : 'neutral').dot().build(cx))
       .actions(actions);
@@ -436,7 +452,7 @@ export default class Chat extends View {
     return MessageScroller.new(`transcript-${conversation.id}`, this.scroller, (index) => {
       const message = conversation.messages[index];
       return message ? this.renderMessage(conversation, message) : null;
-    }).scrollbar(true).jump_button(true).jump_button_label('Latest').flex_1().min_h_0().w_full();
+    }).scrollbar(true).flex_1().min_h_0().w_full();
   }
   // Transcript rows are laid out by the list, so they hold no handlers and no
   // retained components; they paint with the theme's colors directly.
@@ -445,7 +461,8 @@ export default class Chat extends View {
     const column = (child) => h_flex().w_full().justify_center().py(10).child(v_flex().w_full().max_w(760).px(24).child(child));
     if (message.role === 'user') {
       return column(h_flex().w_full().justify_end()
-        .child(div().max_w('85%').px(14).py(9).rounded(t.radius.well).bg(c.raised).text_size(t.type.body + 1).text_color(c.bright).whitespace_normal().child(message.text)));
+        .child(h_flex().max_w('85%').min_h(36).px(14).py(8).items_center().rounded(t.radius.well).bg(c.raised)
+          .child(div().text_size(t.type.body + 1).text_color(c.bright).whitespace_normal().child(message.text))));
     }
     const run = this.running?.assistant === message ? this.running : null;
     const provider = PROVIDERS[message.provider ?? conversation.provider];
@@ -458,25 +475,28 @@ export default class Chat extends View {
         .child(parts.join(' · '))
         .when(Boolean(cost), (el) => el.child(div().text_color(c.accent).child(cost))))
       .when(Boolean(waiting), (el) => el.child(v_flex().gap(4)
-        .child(ShimmerText.new(run.turn.activity || 'Thinking…').id(`shimmer-${message.id}`))
-        .when(Boolean(run?.turn.thinking), (el) => el.child(div().text_size(t.type.small).text_color(c.secondary).whitespace_normal().child(run.turn.thinking.slice(-600))))))
+        .child(ShimmerText.new(run.turn.activity || 'Thinking…').id(`shimmer-${message.id}`).text_size(t.type.body))
+        .when(Boolean(run?.turn.thinking), (el) => el.child(div().text_size(t.type.small).text_color(c.tertiary).whitespace_normal().child(run.turn.thinking.slice(-600))))))
       .when(Boolean(message.text), (el) => el.child(TextView.markdown(`reply-${message.id}`, message.text).selectable(true).w_full().text_size(t.type.body + 1)))
       .when(Boolean(message.error), (el) => el.child(div().text_size(t.type.body).text_color(t.tone('danger').fg).whitespace_normal().child(message.error))));
   }
-  // The latest reply's actions sit between the transcript and the composer.
+  // Transcript rows cannot hold buttons, so the latest reply's actions sit
+  // just under the transcript, on the same column as the messages' text.
   renderReplyActions(conversation, cx) {
     const last = conversation.messages[conversation.messages.length - 1];
     if (this.running || last?.role !== 'assistant') return null;
     const copied = this.copied === last.id;
-    return h_flex().w_full().flex_shrink_0().justify_center().px(24)
-      .child(h_flex().w_full().max_w(760).px(24).gap(4).items_center()
-        .when(Boolean(last.text), (el) => el.child(new Button('copy-reply').label(copied ? 'Copied' : 'Copy').icon(asset(copied ? 'check' : 'copy')).variant('ghost').size('sm').tooltip('Copy the latest reply').onClick((_e, cx) => this.copy(last, cx)).build(cx)))
-        .child(new Button('retry-reply').label('Retry').icon(asset('refresh')).variant('ghost').size('sm').tooltip('Ask again').onClick((_e, cx) => this.retry(cx)).build(cx)));
+    return h_flex().w_full().flex_shrink_0().justify_center()
+      .child(h_flex().w_full().max_w(760).px(18).gap(2).items_center()
+        .when(Boolean(last.text), (el) => el.child(new IconButton('copy-reply').icon(asset(copied ? 'check' : 'copy')).size('sm').description(copied ? 'Copied' : 'Copy reply').onClick((_e, cx) => this.copy(last, cx)).build(cx)))
+        .child(new IconButton('retry-reply').icon(asset('refresh')).size('sm').description('Retry').onClick((_e, cx) => this.retry(cx)).build(cx)));
   }
   renderComposer(cx) {
     const t = theme(), c = t.colors, provider = PROVIDERS[this.provider], running = Boolean(this.running);
     const empty = !this.composer.value().trim();
     const model = provider.models.find((item) => item.id === this.model) ?? provider.models[0];
+    let wide = true;
+    try { wide = window.viewport_size().width - (this.sidebar ? this.sidebarWidth : 0) >= 640; } catch {}
     const modelMenu = new MenuList('model-list').width(200).items(provider.models.map((item) => ({
       id: item.id || 'default', label: item.label, checked: item.id === this.model,
       onSelect: (cx) => { this.menu = null; this.setModel(item.id, cx); },
@@ -484,16 +504,16 @@ export default class Chat extends View {
     return h_flex().w_full().flex_shrink_0().justify_center().px(24).pb(16).pt(8)
       .child(v_flex().w_full().max_w(760).gap(6)
         .child(v_flex().w_full().rounded(t.radius.card).bg(c.card).border(1).border_color(c.borderStrong)
-          .child(div().w_full().px(14).pt(12).pb(4).on_key_down((event, cx) => this.composerKey(event, cx))
+          .child(div().w_full().px(14).pt(12).pb(4)
             .child(Textarea.new(this.composer).w_full().text_size(t.type.body + 1)))
-          .child(h_flex().px(8).pb(8).gap(6).items_center()
+          .child(h_flex().w_full().min_w_0().px(8).pb(8).gap(6).items_center()
             .child(new Segmented('provider').options(providerIds.map((id) => ({ id, label: PROVIDERS[id].label }))).selected(this.provider)
               .disabled(running).onSelect((id, cx) => this.setProvider(id, cx)).build(cx))
             .when(provider.models.length > 1, (el) => el.child(Popup.new('model-popup', new SelectTrigger('model').value(model.label).mono().chevron(asset('chevron-down')).open(this.menu?.kind === 'model').disabled(running)
                 .onClick((_e, cx) => { this.menu = this.menu?.kind === 'model' ? null : { kind: 'model' }; cx.notify(); }).build(cx))
               .anchor('bottom_left').when(this.menu?.kind === 'model', (el) => el.content(modelMenu))))
-            .child(div().flex_1())
-            .child(new Kbd(running ? 'Esc stops' : 'Enter sends').build(cx))
+            .child(div().flex_1().min_w_0())
+            .when(wide, (el) => el.child(new Kbd(running ? 'Esc stops' : 'Enter sends').build(cx)))
             .child(running
               ? new Button('stop').label('Stop').icon(asset('stop')).variant('danger').size('sm').disabled(!this.running.cancel)
                 .tooltip(this.running.cancel ? 'Stop (Esc)' : 'Stopping needs process.spawn in gpui-shell').onClick((_e, cx) => this.stop(cx)).build(cx)
