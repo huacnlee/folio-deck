@@ -1,0 +1,34 @@
+{
+  "id": "com.huacnlee.disktree",
+  "name": "DiskTree",
+  "version": "0.1.0",
+  "shell-version": "0.7.3",
+  "entry": "main.js",
+  "window": {
+    "width": 1440,
+    "height": 900
+  },
+  "capabilities": {
+    "storage": true,
+    "fs": {
+      "read": [
+        "/",
+        "${dataDir}"
+      ],
+      "write": [
+        "${homeDir}",
+        "${dataDir}"
+      ],
+      "execute": [
+        "stat",
+        "df",
+        "mv",
+        "realpath",
+        "readlink",
+        "rm",
+        "xdg-open",
+        "du"
+      ]
+    }
+  }
+}
