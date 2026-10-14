@@ -395,7 +395,7 @@ export default class Chat extends View {
       const version = this.versions[id];
       return { label: PROVIDERS[id].command, value: version === null ? 'checking' : version || 'not found', tone: version ? 'success' : 'neutral' };
     };
-    return new Sidebar('nav').brand('Chat').brandMark(asset('message'))
+    return new Sidebar('nav').brand('Chat').brandMark(asset('message')).brandAction(this.renderToggle(cx))
       .search(new SearchField('chat-search', this.search).icon(asset('search')).build(cx))
       .children(items)
       .footer(new Legend(providerIds.map(status)).build(cx))
@@ -411,14 +411,19 @@ export default class Chat extends View {
     ] : [];
     const count = conversation ? conversation.messages.length : 0;
     const header = new PageHeader(conversation ? displayTitle(conversation) : 'New chat').compact()
-      .leading(new IconButton('toggle-sidebar').icon(asset('panel-left')).selected(this.sidebar)
-        .description(this.sidebar ? 'Hide sidebar (Ctrl + B)' : 'Show sidebar (Ctrl + B)')
-        .onClick((_e, cx) => { this.sidebar = !this.sidebar; this.persistPrefs(); cx.notify(); }).build(cx))
       .breadcrumb([provider.label, model.id || 'default model'])
       .badge(new Badge(busy ? 'Replying' : 'Ready').tone(busy ? 'accent' : 'neutral').dot().build(cx))
       .actions(actions);
     if (count) header.meta(`${count} message${count === 1 ? '' : 's'}`);
+    if (!this.sidebar) header.leading(this.renderToggle(cx));
     return header.build(cx);
+  }
+  // The toggle sits in the sidebar while it is open and moves to the start of
+  // the title once the sidebar is shut.
+  renderToggle(cx) {
+    return new IconButton('toggle-sidebar').icon(asset('panel-left')).size('sm')
+      .description(this.sidebar ? 'Hide sidebar (Ctrl + B)' : 'Show sidebar (Ctrl + B)')
+      .onClick((_e, cx) => { this.sidebar = !this.sidebar; this.persistPrefs(); cx.notify(); }).build(cx);
   }
   renderBanner(cx) {
     const t = theme(), text = String(this.message.text).split('\n').map((line) => line.trim()).filter(Boolean).pop() ?? '';
