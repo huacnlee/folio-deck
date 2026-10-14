@@ -1,0 +1,95 @@
+name: Release apps
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set scratch directory outside the checkout
+        run: |
+          mkdir -p "$HOME/.cache/gpui-shell-release-tmp"
+          echo "TMPDIR=$HOME/.cache/gpui-shell-release-tmp" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/gpui-shell-release" >> "$GITHUB_ENV"
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libasound2-dev libvulkan1 mesa-vulkan-drivers xvfb poppler-utils
+      - name: Install latest gpui-shell from Git
+        run: cargo install --git https://github.com/longbridge/gpui-kit gpui-shell --locked
+      - name: Test app logic
+        shell: bash
+        run: |
+          for app in apps/*; do
+            test -f "$app/gpui-shell.json" || continue
+            tests=("$app"/tests/*.test.mjs)
+            if test -f "${tests[0]}"; then
+              node --experimental-vm-modules --test "${tests[@]}"
+            fi
+          done
+          python3 apps/folio-deck/tests/install_test.py
+          python3 apps/omanta/tests/check-views.py
+      - name: Package every app at the tag version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/package-apps.py --tag "$RELEASE_TAG" --out dist
+      - name: Validate packaged apps with the native runtime
+        shell: bash
+        run: |
+          mkdir -p target/release-check
+          for archive in dist/*.tar.gz; do
+            tar -xzf "$archive" -C target/release-check
+          done
+          for app in target/release-check/*; do
+            xvfb-run -a gpui-shell check -d "$app"
+          done
+          cd dist
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-apps
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-apps
+          path: dist
+      - name: Publish all apps in the tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+          else
+            options=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then options+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS \
+              --verify-tag --title "$RELEASE_TAG" --generate-notes "${options[@]}"
+          fi

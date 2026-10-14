@@ -193,8 +193,9 @@ test("poppler and macOS read the signed copy", { skip: !has("pdfinfo") && !has("
   }
 });
 
-test("real PDFs on this machine parse with the right page count", { skip: !has("pdfinfo") && "pdfinfo not installed" }, () => {
+test("real PDFs on this machine parse with the right page count", { skip: !has("pdfinfo") && "pdfinfo not installed" }, (t) => {
   const found = execFileSync("sh", ["-c", "{ ls /System/Library/ProductDocuments/ProductGuides/*.pdf; find /System/Library /Library/Documentation /opt/homebrew/share -name '*.pdf' -size +20k; } 2>/dev/null | head -10"], { encoding: "utf8" }).split("\n").filter(Boolean);
+  if (found.length === 0) return t.skip("No system PDF fixtures available");
   let checked = 0, texts = 0, paths = 0;
   for (const file of found) {
     let expected;
