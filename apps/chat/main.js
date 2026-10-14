@@ -31,6 +31,7 @@ export default class Chat extends View {
     applyTheme({ mono: process.platform === 'darwin' ? 'Menlo' : 'JetBrainsMono Nerd Font' });
     // `null` while checking; a version string, or `false` when not installed.
     this.versions = { claude: null, codex: null };
+    this.codex = null;
     this.focus = cx.focus_handle();
     this.focus.focus();
     this.conversations = [];
@@ -69,6 +70,17 @@ export default class Chat extends View {
       const family = result?.code === 0 ? result.stdout.trim() : '';
       if (family) { applyTheme({ mono: family }); cx.notify(); }
     });
+    // GPUI lowers a mixed line's baseline to fit a fallback font's ascent, so
+    // Chinese drawn from a fallback sits low. A CJK family that also draws
+    // Latin as the sans family keeps every line on one set of metrics.
+    cx.spawn(async (cx) => {
+      if (process.platform === 'darwin') { applyTheme({ sans: 'PingFang SC' }); cx.notify(); return; }
+      const result = await process.run('fc-list', [':lang=zh:style=Regular', 'family']).catch(() => null);
+      if (result?.code !== 0) return;
+      const families = result.stdout.split('\n').flatMap((line) => line.split(',')).map((name) => name.trim());
+      const family = ['Noto Sans CJK SC', 'Source Han Sans SC', 'Noto Sans SC', 'Source Han Sans CN', 'WenQuanYi Micro Hei'].find((name) => families.includes(name));
+      if (family) { applyTheme({ sans: family }); cx.notify(); }
+    });
     for (const id of providerIds) {
       cx.spawn(async (cx) => {
         const result = await process.run(PROVIDERS[id].command, ['--version'], { timeoutMs: 15000 }).catch(() => null);
@@ -98,6 +110,7 @@ export default class Chat extends View {
       }
       this.loaded = true;
       if (this.loadError) this.message = { error: true, text: this.loadError };
+      this.prewarm();
       cx.notify();
     });
   }
@@ -135,9 +148,14 @@ export default class Chat extends View {
     this.menu = null;
     cx.notify();
   }
+  // Start the Codex app server ahead of the first message when Codex is chosen.
+  prewarm() {
+    if (this.provider === 'codex' && typeof process.spawn === 'function' && this.versions.codex !== false) this.codexServer();
+  }
   setProvider(provider, cx) {
     if (this.provider === provider) return;
     this.provider = provider;
+    this.prewarm();
     if (!PROVIDERS[provider].models.some((model) => model.id === this.model)) this.model = '';
     this.persistPrefs();
     cx.notify();
@@ -204,27 +222,8 @@ export default class Chat extends View {
     // Stream when the runtime can; otherwise wait for the whole reply.
     if (typeof process.spawn === 'function' && provider === 'codex') {
       // `codex exec --json` prints a reply only once it is whole; the app
-      // server streams it as it is written.
-      const session = codexSession({ prompt, sessionId, model: conversation.model, cwd: this.workdir });
-      run.turn = session.turn;
-      try {
-        const child = process.spawn(command, ['app-server', '-c', 'sandbox_mode="read-only"'], { lines: true, stdin: 'pipe', ...(this.workdir ? { cwd: this.workdir } : {}) });
-        const send = (lines) => { for (const line of lines) child.write(`${line}\n`); };
-        child.on('stdout', (line, cx) => {
-          if (this.running !== run) return;
-          const { write, changed } = session.receive(line);
-          send(write);
-          if (changed) { assistant.text = session.turn.text; this.notifySoon(cx); }
-          if (session.done) child.kill();
-        }).on('stderr', (line) => { run.stderr.push(line); }).on('exit', onExit);
-        send(session.start());
-        run.cancel = () => {
-          const lines = session.interrupt();
-          if (lines.length) send(lines); else child.kill();
-          // A turn that does not acknowledge the interrupt promptly is ended.
-          cx.spawn(async (cx) => { await cx.sleep(1500); if (this.running === run) child.kill(); });
-        };
-      } catch (error) { this.finishTurn(run, { code: null, error: reason(error) }, cx); }
+      // server streams it as it is written, and stays running between turns.
+      this.codexTurn(run, prompt, cx);
     } else if (typeof process.spawn === 'function') {
       try {
         const child = process.spawn(command, args, { lines: true, stdin: 'null', ...(this.workdir ? { cwd: this.workdir } : {}) });
@@ -241,9 +240,82 @@ export default class Chat extends View {
         this.finishTurn(run, { code: output.code }, cx);
       });
     }
+    // Redraw often while waiting for the first words, so the thinking shimmer
+    // moves, and once a second after that for the elapsed time.
     cx.spawn(async (cx) => {
-      while (this.running === run) { await cx.sleep(1000); if (this.running === run) cx.notify(); }
+      while (this.running === run) {
+        await cx.sleep(run.assistant.text ? 1000 : 90);
+        if (this.running === run) cx.notify();
+      }
     });
+  }
+
+  // ---- codex app server ----------------------------------------------------
+
+  /**
+   * One `codex app-server` serves every Codex turn: it is started and
+   * initialized once, ahead of the first message when Codex is chosen, so a
+   * turn starts with its thread request instead of a cold start.
+   */
+  codexServer() {
+    if (this.codex && !this.codex.exited) return this.codex;
+    const server = { child: null, ready: false, exited: false, queue: [], turn: null, nextId: 1000 };
+    this.codex = server;
+    try {
+      server.child = process.spawn(PROVIDERS.codex.command, ['app-server', '-c', 'sandbox_mode="read-only"'], { lines: true, stdin: 'pipe', ...(this.workdir ? { cwd: this.workdir } : {}) });
+    } catch (error) {
+      server.exited = true;
+      server.error = reason(error);
+      return server;
+    }
+    const write = (line) => server.child.write(`${line}\n`);
+    server.write = write;
+    server.child.on('stdout', (line, cx) => {
+      if (!server.ready) {
+        let message;
+        try { message = JSON.parse(line); } catch { return; }
+        if (message.id !== 0) return;
+        if (message.error) { server.error = message.error.message; server.child.kill(); return; }
+        server.ready = true;
+        write(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }));
+        for (const start of server.queue.splice(0)) start(cx);
+        return;
+      }
+      server.turn?.(line, cx);
+    }).on('stderr', (line) => { server.stderr = line; })
+      .on('exit', (exit, cx) => {
+        server.exited = true;
+        if (this.codex === server) this.codex = null;
+        server.onExit?.(exit, cx);
+      });
+    write(JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { clientInfo: { name: 'gpui-shell-chat', version: '0.1.0' }, capabilities: null } }));
+    return server;
+  }
+  codexTurn(run, prompt, cx) {
+    const server = this.codexServer();
+    if (server.exited) { this.finishTurn(run, { code: null, error: server.error ?? 'Codex did not start.' }, cx); return; }
+    const session = codexSession({ prompt, sessionId: run.sessionId, model: run.conversation.model, cwd: this.workdir, connected: true, firstId: (server.nextId += 1000) });
+    run.turn = session.turn;
+    if (!server.ready) session.turn.phase = 'starting';
+    const send = (lines) => lines.forEach((line) => server.write(line));
+    const end = (exit, cx) => { server.turn = null; server.onExit = null; this.finishTurn(run, exit, cx); };
+    server.turn = (line, cx) => {
+      const { write, changed } = session.receive(line);
+      send(write);
+      if (changed) { run.assistant.text = session.turn.text; this.notifySoon(cx); }
+      if (session.done) end({ code: 0 }, cx);
+    };
+    // The server ending mid-turn ends the turn with whatever it said last.
+    server.onExit = (exit, cx) => end(exit.error || exit.code ? exit : { code: null, error: server.stderr || 'Codex stopped unexpectedly.' }, cx);
+    run.cancel = () => {
+      const lines = session.interrupt();
+      if (lines.length) send(lines); else server.child.kill();
+      // A turn that does not acknowledge the interrupt promptly takes the
+      // server with it; the next turn starts a fresh one.
+      cx.spawn(async (cx) => { await cx.sleep(1500); if (this.running === run) server.child.kill(); });
+    };
+    const start = (cx) => { session.turn.phase = 'thinking'; send(session.start()); this.notifySoon(cx); };
+    if (server.ready) start(cx); else server.queue.push(start);
   }
   // Coalesce redraws while tokens stream in.
   notifySoon(cx) {
@@ -391,14 +463,19 @@ export default class Chat extends View {
           .build(cx));
       }
     }
+    const t = theme(), c = t.colors;
     const status = (id) => {
       const version = this.versions[id];
-      return { label: PROVIDERS[id].command, value: version === null ? 'checking' : version || 'not found', tone: version ? 'success' : 'neutral' };
+      return h_flex().h(26).px(8).gap(8).items_center()
+        .child(div().text_color(version ? c.foreground : c.tertiary).child(icon(id, 13)))
+        .child(div().flex_1().min_w_0().text_size(t.type.body).text_color(version ? c.foreground : c.secondary).child(PROVIDERS[id].label))
+        .child(div().flex_shrink_0().text_size(t.type.small).font_family(t.fonts.mono).text_color(version ? c.secondary : c.tertiary)
+          .child(version === null ? 'checking' : version || 'not installed'));
     };
     return new Sidebar('nav').brand('Chat').brandMark(asset('message')).brandAction(this.renderToggle(cx))
       .search(new SearchField('chat-search', this.search).icon(asset('search')).build(cx))
       .children(items)
-      .footer(new Legend(providerIds.map(status)).build(cx))
+      .footer(v_flex().gap(1).children(providerIds.map(status)))
       .build(cx);
   }
   renderHeader(conversation, cx) {
@@ -476,11 +553,11 @@ export default class Chat extends View {
     const waiting = run && !message.text;
     return column(v_flex().w_full().gap(6)
       .child(h_flex().gap(6).items_center().text_size(t.type.small).font_family(t.fonts.mono).text_color(c.secondary)
-        .child(div().text_color(run ? c.accent : c.secondary).child(icon('terminal', 12)))
+        .child(div().text_color(run ? c.accent : c.secondary).child(icon(message.provider ?? conversation.provider, 12)))
         .child(parts.join(' · '))
         .when(Boolean(cost), (el) => el.child(div().text_color(c.accent).child(cost))))
       .when(Boolean(waiting), (el) => el.child(v_flex().gap(4)
-        .child(ShimmerText.new(run.turn.activity || 'Thinking…').id(`shimmer-${message.id}`).text_size(t.type.body))
+        .child(ShimmerText.new(run.turn.activity || (run.turn.phase === 'starting' ? `Starting ${provider.label}…` : 'Thinking…')).id(`shimmer-${message.id}`).text_size(t.type.body))
         .when(Boolean(run?.turn.thinking), (el) => el.child(div().text_size(t.type.small).text_color(c.tertiary).whitespace_normal().child(run.turn.thinking.slice(-600))))))
       .when(Boolean(message.text), (el) => el.child(TextView.markdown(`reply-${message.id}`, message.text).selectable(true).w_full().text_size(t.type.body + 1)))
       .when(Boolean(message.error), (el) => el.child(div().text_size(t.type.body).text_color(t.tone('danger').fg).whitespace_normal().child(message.error))));

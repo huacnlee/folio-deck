@@ -61,6 +61,8 @@ export function createTurn() {
     text: '',
     thinking: '',
     activity: '',
+    // 'starting' while the tool launches, then 'thinking' until text arrives.
+    phase: 'starting',
     sessionId: null,
     model: '',
     error: null,
@@ -92,6 +94,8 @@ function applyClaude(turn, event) {
       if (event.subtype === 'init') {
         turn.sessionId = event.session_id ?? turn.sessionId;
         turn.model = event.model ?? turn.model;
+        turn.phase = 'thinking';
+        return true;
       }
       return false;
     case 'stream_event': {
@@ -232,11 +236,16 @@ export function parseVersion(stdout) {
  * write, and `receive(line)` folds one line from the server into `turn` and
  * gives the lines to write in answer. The caller owns the process.
  *
- * @param {{ prompt: string, sessionId?: string | null, model?: string, cwd?: string | null }} options
+ * `connected` reuses an app server that has already been initialized, so a
+ * turn begins with its thread request; `firstId` keeps this turn's request
+ * ids clear of earlier turns on the same server.
+ *
+ * @param {{ prompt: string, sessionId?: string | null, model?: string, cwd?: string | null, connected?: boolean, firstId?: number }} options
  */
-export function codexSession({ prompt, sessionId = null, model = '', cwd = null }) {
+export function codexSession({ prompt, sessionId = null, model = '', cwd = null, connected = false, firstId = 0 }) {
   const turn = createTurn();
-  let nextId = 0, threadId = null, turnId = null;
+  turn.phase = connected ? 'thinking' : 'starting';
+  let nextId = firstId, threadId = null, turnId = null;
   /** @type {Map<number, string>} */
   const pending = new Map();
   const request = (method, params) => {
@@ -247,6 +256,7 @@ export function codexSession({ prompt, sessionId = null, model = '', cwd = null 
   // Every turn is read-only and never asks for approval, new or resumed.
   const threadParams = { sandbox: 'read-only', approvalPolicy: 'never', ...(cwd ? { cwd } : {}), ...(model ? { model } : {}) };
   const failed = (message) => { turn.error = String(message || 'Codex reported an error.'); turn.done = true; };
+  const threadRequest = () => sessionId ? request('thread/resume', { threadId: sessionId, ...threadParams }) : request('thread/start', threadParams);
   const textOf = () => Object.values(turn.items).filter(Boolean).join('\n\n');
 
   return {
@@ -254,6 +264,7 @@ export function codexSession({ prompt, sessionId = null, model = '', cwd = null 
     get threadId() { return threadId; },
     get done() { return turn.done; },
     start() {
+      if (connected) return [threadRequest()];
       return [request('initialize', { clientInfo: { name: 'gpui-shell-chat', version: '0.1.0' }, capabilities: null })];
     },
     /** A request that stops the running turn, when there is one. */
@@ -281,16 +292,14 @@ export function codexSession({ prompt, sessionId = null, model = '', cwd = null 
         }
         if (method === 'initialize') {
           return {
-            write: [
-              JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }),
-              sessionId ? request('thread/resume', { threadId: sessionId, ...threadParams }) : request('thread/start', threadParams),
-            ],
+            write: [JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }), threadRequest()],
             changed: false,
           };
         }
         if (method === 'thread/start' || method === 'thread/resume') {
           threadId = message.result?.thread?.id ?? sessionId;
           turn.sessionId = threadId;
+          turn.phase = 'thinking';
           return { write: [request('turn/start', { threadId, input: [{ type: 'text', text: prompt, text_elements: [] }] })], changed: false };
         }
         if (method === 'turn/start') turnId = message.result?.turn?.id ?? turnId;

@@ -23,7 +23,8 @@
       "execute": [
         "claude",
         "codex",
-        "fc-match"
+        "fc-match",
+        "fc-list"
       ]
     },
     "clipboard": {

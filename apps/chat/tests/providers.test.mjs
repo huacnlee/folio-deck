@@ -37,6 +37,8 @@ test('claude stream: deltas build the text, the final message and result settle 
   assert.equal(turn.text, '1\n2');
   assert.equal(turn.thinking, 'Counting.');
   assert.equal(turn.sessionId, 's1');
+  assert.equal(turn.phase, 'thinking');
+  assert.equal(createTurn().phase, 'starting');
   applyLine('claude', turn, JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5-5', content: [{ type: 'text', text: '1\n2\n3' }] } }));
   applyLine('claude', turn, JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '1\n2\n3', session_id: 's1', total_cost_usd: 0.02, usage: { output_tokens: 5 } }));
   assert.equal(turn.text, '1\n2\n3');
@@ -149,4 +151,17 @@ test('codex app-server: resumes by thread id, refuses server requests, reports f
   const retried = codexSession({ prompt: 'x' });
   retried.receive(rpc({ method: 'error', params: { error: { message: 'busy' }, willRetry: true } }));
   assert.equal(retried.turn.error, null);
+});
+
+test('codex app-server: a connected session starts with its thread request and its own ids', () => {
+  const session = codexSession({ prompt: 'again', sessionId: 't2', connected: true, firstId: 500 });
+  assert.equal(session.turn.phase, 'thinking');
+  const [resume] = session.start().map(JSON.parse);
+  assert.equal(resume.method, 'thread/resume');
+  assert.equal(resume.id, 501);
+  // A late reply to another turn's request is not this session's.
+  assert.deepEqual(session.receive(JSON.stringify({ jsonrpc: '2.0', id: 3, result: {} })).write, []);
+  const [turnStart] = session.receive(JSON.stringify({ jsonrpc: '2.0', id: 501, result: { thread: { id: 't2' } } })).write.map(JSON.parse);
+  assert.equal(turnStart.method, 'turn/start');
+  assert.equal(codexSession({ prompt: 'x' }).turn.phase, 'starting');
 });
