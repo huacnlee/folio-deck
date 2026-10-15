@@ -1,6 +1,6 @@
 // @ts-check
 import { View, div } from "gpui-kit";
-import { h_flex, v_flex, Button, Input, InputState, Textarea, TextareaState, Popover } from "gpui-base";
+import { h_flex, v_flex, Button, Input, InputState, Textarea, TextareaState, Popover, Scrollbar, v_virtual_list } from "gpui-base";
 import { Switch, Spinner } from "gpui-component";
 import * as fs from "fs/promises";
 import { randomUUID } from "crypto";
@@ -25,6 +25,20 @@ const CATALOG_KEY = "skills.catalog.v1";
 const SEEN_KEY = "skills.first-seen.v1";
 const PREFS_KEY = "skills.prefs.v1";
 const CATALOG_TTL = 6 * 60 * 60 * 1000;
+
+// Card grid geometry, shared by the cards and the virtual list that places them.
+const CARD_BASIS = 260;
+const CARD_HEIGHT = 164;
+const CARD_GAP = 24;
+const GROUP_HEADING = 66;
+
+/** An empty cell that keeps a short last row's cards the width of the others. */
+const cardSlot = () => div().flex_grow(1).flex_shrink(1).flex_basis(CARD_BASIS).min_w_0();
+
+/**
+ * @typedef {{ id: string, title: string, detail: string, skills: any[],
+ *   key: (skill: any) => string, card: (skill: any) => any }} CardGroup
+ */
 
 // File operations run inside gpui-shell under the manifest grants.
 const deps = {
@@ -322,17 +336,14 @@ export default class Skills extends View {
               .bg(colors.surface)
               .overflow_hidden()
               .child(this.renderTopBar(cx))
-              .child(
+              // The skills page scrolls its cards in a virtual list of its own.
+              .child(this.page === "skills" ? this.renderSkills(cx) :
                 div()
                   .id("page-scroll")
                   .flex_1()
                   .min_h_0()
                   .overflow_y_scrollbar()
-                  .child(
-                    this.page === "trash" ? this.renderTrash(cx)
-                      : this.page === "folders" ? this.renderFolders(cx)
-                      : this.renderSkills(cx),
-                  ),
+                  .child(this.page === "trash" ? this.renderTrash(cx) : this.renderFolders(cx)),
               ),
           ),
       )
@@ -558,26 +569,32 @@ export default class Skills extends View {
     );
 
     column.child(this.renderNotices(cx));
+    const page = v_flex().flex_1().min_h_0().overflow_hidden();
+    const done = () => page.child(column);
+    /** @type {CardGroup[]} */
+    const groups = [];
+    const cards = () => page.child(column.pb(0)).child(this.cardList(cx, groups));
 
     if (this.tab === "installed") {
       if (!hasRoots) {
         column.child(this.empty(cx, "folder", "No agent folders are granted to this copy",
           "Skills reads ~/.claude/skills, ~/.codex/skills and ~/.agents/skills directly."));
-        return column;
+        return done();
       }
       let list = filterLocal(searchSkills(this.local, query), this.filter);
       list = sortSkills(list, this.sort.installed, (s) => s.mtime ?? 0);
       if (list.length === 0) {
         column.child(this.empty(cx, "search", this.local.length ? "No skills match" : this.scanning ? "Scanning folders…" : "No skills installed yet",
           this.local.length ? "Clear the search or the filter to see every skill." : "Add one, import a folder, or install one from Discover."));
-        return column;
+        return done();
       }
       for (const root of agentRoots) {
         const inRoot = list.filter((skill) => skill.rootId === root.id);
         if (inRoot.length === 0) continue;
-        column.child(this.group(cx, `${root.label}`, show(root.path), inRoot.map((skill) => this.localCard(skill, cx))));
+        groups.push({ id: root.id, title: root.label, detail: show(root.path), skills: inRoot,
+          key: (skill) => skill.key, card: (skill) => this.localCard(skill, cx) });
       }
-      return column;
+      return cards();
     }
 
     // Discover
@@ -585,22 +602,27 @@ export default class Skills extends View {
       column.child(this.fetching
         ? this.empty(cx, "compass", "Loading skills from GitHub…", this.fetchProgress)
         : this.empty(cx, "alert", "Discover could not load", this.fetchError ?? "No catalog yet."));
-      return column;
+      return done();
     }
     const skills = this.catalog.skills.filter((skill) => this.filter.repo === "all" || skill.repo === this.filter.repo);
     const recency = (s) => this.firstSeen[s.id] || Date.parse(s.pushedAt) || 0;
     if (query.trim() || filtered) {
       const results = sortSkills(searchSkills(skills, query), this.sort.discover, recency);
-      column.child(results.length
-        ? this.group(cx, `${results.length} result${results.length === 1 ? "" : "s"}`, "", results.map((s) => this.remoteCard(s, "bolt", cx)))
-        : this.empty(cx, "search", "No skills match", "Try another word, or clear the filter."));
-      return column;
+      if (!results.length) {
+        column.child(this.empty(cx, "search", "No skills match", "Try another word, or clear the filter."));
+        return done();
+      }
+      groups.push({ id: "results", title: `${results.length} result${results.length === 1 ? "" : "s"}`, detail: "", skills: results,
+        key: (skill) => skill.id, card: (skill) => this.remoteCard(skill, "bolt", cx) });
+      return cards();
     }
     for (const group of groupDiscover(skills, this.firstSeen)) {
       const ordered = this.sort.discover === "rank" ? group.skills : sortSkills(group.skills, this.sort.discover, recency);
-      column.child(this.group(cx, group.title, "", ordered.map((s) => this.remoteCard(s, group.id === "recommended" ? "skills" : "bolt", cx))));
+      const iconName = group.id === "recommended" ? "skills" : "bolt";
+      groups.push({ id: group.id, title: group.title, detail: "", skills: ordered,
+        key: (skill) => skill.id, card: (skill) => this.remoteCard(skill, iconName, cx) });
     }
-    return column;
+    return cards();
   }
 
   renderNotices(cx) {
@@ -657,7 +679,45 @@ export default class Skills extends View {
     return v_flex().children(rows);
   }
 
-  /** Cards wrap using native layout as the window changes width. */
+  /**
+   * Group headings and rows of cards in one virtual list, so only the rows on
+   * screen are built. The column count follows the window width, as the
+   * wrapping grid it replaces did; a short last row keeps cards the same width.
+   * @param {CardGroup[]} groups
+   */
+  cardList(cx, groups) {
+    let width = 1200;
+    try { width = window.viewport_size().width; } catch {}
+    // Rail, the panel's right margin and border, and the column's padding.
+    const content = width - 56 - 8 - 2 - 64;
+    const columns = Math.max(1, Math.floor((content + CARD_GAP) / (CARD_BASIS + CARD_GAP)));
+    /** @type {{ key: string, size: number, render: () => any }[]} */
+    const rows = [];
+    for (const group of groups) {
+      rows.push({ key: `group-${group.id}`, size: GROUP_HEADING, render: () => this.groupHeading(cx, group.title, group.detail) });
+      for (let i = 0; i < group.skills.length; i += columns) {
+        const slice = group.skills.slice(i, i + columns);
+        rows.push({
+          key: `cards-${group.id}-${group.key(slice[0])}`,
+          size: CARD_HEIGHT + CARD_GAP,
+          render: () => h_flex().w_full().px(32).pt(CARD_GAP).gap(CARD_GAP).items_stretch()
+            .children(slice.map(group.card))
+            .children(Array.from({ length: columns - slice.length }, () => cardSlot())),
+        });
+      }
+    }
+    rows.push({ key: "end", size: 32, render: () => div() });
+    const id = `skills-${this.tab}`;
+    return div()
+      .relative()
+      .flex_1()
+      .min_h_0()
+      .child(v_virtual_list(id, rows.length, rows.map((row) => row.size), (index) => rows[index].key,
+        (range) => rows.slice(range.start, range.end).map((row) => row.render())).size_full())
+      .child(Scrollbar.vertical(id).absolute().inset_0());
+  }
+
+  /** A short group of cards that wrap as the window changes width. */
   group(cx, title, detail, cards) {
     return v_flex()
       .mt(44)
@@ -670,7 +730,18 @@ export default class Skills extends View {
           .child(muted(title, cx, 15))
           .when(Boolean(detail), (el) => el.child(div().text_size(12).text_color(palette.subtle).child(detail))),
       )
-      .child(h_flex().w_full().flex_wrap().gap(24).items_stretch().children(cards));
+      .child(h_flex().w_full().flex_wrap().gap(CARD_GAP).items_stretch().children(cards));
+  }
+
+  groupHeading(cx, title, detail) {
+    return h_flex()
+      .w_full()
+      .h(GROUP_HEADING)
+      .px(32)
+      .gap(10)
+      .items_end()
+      .child(muted(title, cx, 15))
+      .when(Boolean(detail), (el) => el.child(div().min_w_0().truncate().text_size(12).text_color(palette.subtle).child(detail)));
   }
 
   /** The shared card frame. */
@@ -680,10 +751,9 @@ export default class Skills extends View {
       .id(id)
       .flex_grow(1)
       .flex_shrink(1)
-      .flex_basis(260)
-      .max_w("100%")
+      .flex_basis(CARD_BASIS)
       .min_w_0()
-      .h(164)
+      .h(CARD_HEIGHT)
       .flex()
       .flex_col()
       .p(16)
@@ -718,6 +788,9 @@ export default class Skills extends View {
       .child(footer.w_full());
   }
 
+  // Card controls carry no tooltips: inside the virtual list, a tooltip stays
+  // on screen after a scroll has moved its control away.
+
   /** @param {LocalSkill} skill */
   localCard(skill, cx) {
     const busy = this.busy[skill.key];
@@ -728,7 +801,6 @@ export default class Skills extends View {
         : new Switch(`enable-${skill.key}`)
             .size("small")
             .checked(skill.enabled)
-            .tooltip(skill.enabled ? "Enabled — the agent can load it" : "Disabled — renamed to SKILL.md.disabled")
             .on_change((checked, cx) => this.toggle(skill, checked, cx));
     const tags = [];
     if (skill.linked) tags.push(pill("Linked", cx));
@@ -758,15 +830,15 @@ export default class Skills extends View {
       ? h_flex().gap(6).items_center().child(new Spinner().size("small")).child(muted(busy, cx, 12))
       : everywhere
         ? div().flex().items_center().justify_center().size(26).rounded(6).bg(colors.muted).text_color(palette.success).child(icon("check", 15))
-        : iconButton(`install-${skill.id}`, "plus", (cx) => this.openInstall(skill, cx), cx, {
-            tooltip: installed.length ? `Installed in ${installed.map((l) => l.rootLabel).join(", ")} — add elsewhere` : "Install",
-          });
+        : iconButton(`install-${skill.id}`, "plus", (cx) => this.openInstall(skill, cx), cx);
     const footer = h_flex()
       .gap(8)
       .items_center()
-      .child(byline(skill.author, cx))
+      .child(byline(skill.author, cx, ""))
       .child(div().flex_1())
-      .when(installed.length > 0, (el) => el.child(pill(`Installed${agentRoots.length > 1 ? ` · ${installed.map((l) => l.rootLabel).join(", ")}` : ""}`, cx, "success")));
+      // A long list of folders shortens rather than spilling past the card.
+      .when(installed.length > 0, (el) => el.child(pill(`Installed${agentRoots.length > 1 ? ` · ${installed.map((l) => l.rootLabel).join(", ")}` : ""}`, cx, "success")
+        .flex_shrink(1).min_w_0().truncate()));
     return this.card(`remote-${skill.id}`, cx, iconName, skill.name, action, truncate(skill.description || "No description.", 100), footer,
       (cx) => this.openDialog({ kind: "remote", skill }, cx));
   }
