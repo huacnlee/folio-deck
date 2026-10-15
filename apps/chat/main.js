@@ -5,11 +5,12 @@ import * as components from 'gpui-component';
 import { MessageScroller, MessageScrollerState, ShimmerText } from 'gpui-component';
 import * as fs from 'fs/promises';
 import { randomUUID } from 'crypto';
+import * as os from 'os';
 import {
   AppFrame, Badge, Button, Card, Chip, EmptyState, IconBadge, IconButton, Kbd, Legend, MenuList, NavItem, NavSection,
   PageHeader, Pulse, ScanLine, SearchField, Segmented, SelectTrigger, Sidebar, Steps, Tag, applyTheme, theme,
 } from 'zion-ui';
-import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession, describeActivity, continuePrompt } from './lib/providers.js';
+import { PROVIDERS, providerIds, shellCommand, isMac, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession, describeActivity, continuePrompt } from './lib/providers.js';
 import { extractLinks, isWebUrl } from './lib/links.js';
 import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost, markInterrupted } from './lib/store.js';
 
@@ -24,7 +25,13 @@ const SUGGESTIONS = [
 const asset = (name) => `chat/icons/${name}.svg`;
 const icon = (name, size = 14) => svg(asset(name)).size(size).flex_shrink_0();
 const reason = (error) => String(error?.message ?? error).replace(/^Error:\s*/, '');
+/** A tool's program and arguments, started through the user's login shell. */
+const tool = (command, args) => shellCommand(command, args, { platform: process.platform, home: os.homedir() });
 const TICK_MS = 450;
+// macOS draws the window's close, minimise and zoom buttons over the content's
+// top-left corner; content there moves below or beside them.
+const MAC = isMac(process.platform);
+const TRAFFIC_LIGHTS = MAC ? { top: 20, left: 64 } : { top: 0, left: 0 };
 const MAX_LINKS = 6;
 const LINK_MIN = 280;
 const ZOOMS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
@@ -39,7 +46,7 @@ function savePrefs(value) { try { localStorage.setItem(PREFS, JSON.stringify(val
 export default class Chat extends View {
   init(_props, cx) {
     const prefs = loadPrefs();
-    applyTheme({ mono: process.platform === 'darwin' ? 'Menlo' : 'JetBrainsMono Nerd Font' });
+    applyTheme({ mono: MAC ? 'Menlo' : 'JetBrainsMono Nerd Font' });
     // `null` while checking; a version string, or `false` when not installed.
     this.versions = { claude: null, codex: null };
     this.codex = null;
@@ -83,7 +90,7 @@ export default class Chat extends View {
     this.renameState.on('submit', (_event, cx) => this.confirmRename(cx));
     this.load(cx);
     cx.spawn(async (cx) => {
-      if (process.platform === 'darwin') return;
+      if (MAC) return;
       const result = await process.run('fc-match', ['monospace', '-f', '%{family[0]}']).catch(() => null);
       const family = result?.code === 0 ? result.stdout.trim() : '';
       if (family) { applyTheme({ mono: family }); cx.notify(); }
@@ -92,7 +99,7 @@ export default class Chat extends View {
     // Chinese drawn from a fallback sits low. A CJK family that also draws
     // Latin as the sans family keeps every line on one set of metrics.
     cx.spawn(async (cx) => {
-      if (process.platform === 'darwin') { applyTheme({ sans: 'PingFang SC' }); cx.notify(); return; }
+      if (MAC) { applyTheme({ sans: 'PingFang SC' }); cx.notify(); return; }
       const result = await process.run('fc-list', [':lang=zh:style=Regular', 'family']).catch(() => null);
       if (result?.code !== 0) return;
       const families = result.stdout.split('\n').flatMap((line) => line.split(',')).map((name) => name.trim());
@@ -101,7 +108,7 @@ export default class Chat extends View {
     });
     for (const id of providerIds) {
       cx.spawn(async (cx) => {
-        const result = await process.run(PROVIDERS[id].command, ['--version'], { timeoutMs: 15000 }).catch(() => null);
+        const result = await process.run(...tool(PROVIDERS[id].command, ['--version']), { timeoutMs: 15000 }).catch(() => null);
         this.versions[id] = (result?.code === 0 && parseVersion(result.stdout)) || false;
         cx.notify();
       });
@@ -277,14 +284,14 @@ export default class Chat extends View {
       this.codexTurn(run, prompt, cx);
     } else if (typeof process.spawn === 'function') {
       try {
-        const child = process.spawn(command, args, { lines: true, stdin: 'null', ...(this.workdir ? { cwd: this.workdir } : {}) });
+        const child = process.spawn(...tool(command, args), { lines: true, stdin: 'null', ...(this.workdir ? { cwd: this.workdir } : {}) });
         child.on('stdout', onLine).on('stderr', (line) => { run.stderr.push(line); }).on('exit', onExit);
         run.cancel = () => child.kill();
       } catch (error) { this.finishTurn(run, { code: null, error: reason(error) }, cx); }
     } else {
       cx.spawn(async (cx) => {
         let output;
-        try { output = await process.run(command, args); }
+        try { output = await process.run(...tool(command, args)); }
         catch (error) { this.finishTurn(run, { code: null, error: reason(error) }, cx); return; }
         for (const line of output.stdout.split('\n')) onLine(line, cx);
         run.stderr.push(output.stderr);
@@ -314,7 +321,7 @@ export default class Chat extends View {
     const server = { child: null, ready: false, exited: false, queue: [], turn: null, nextId: 1000 };
     this.codex = server;
     try {
-      server.child = process.spawn(PROVIDERS.codex.command, ['app-server', '-c', 'sandbox_mode="read-only"'], { lines: true, stdin: 'pipe', ...(this.workdir ? { cwd: this.workdir } : {}) });
+      server.child = process.spawn(...tool(PROVIDERS.codex.command, ['app-server', '-c', 'sandbox_mode="read-only"']), { lines: true, stdin: 'pipe', ...(this.workdir ? { cwd: this.workdir } : {}) });
     } catch (error) {
       server.exited = true;
       server.error = reason(error);
@@ -634,11 +641,12 @@ export default class Chat extends View {
         .child(div().flex_shrink_0().text_size(t.type.small).font_family(t.fonts.mono).text_color(version ? c.secondary : c.tertiary)
           .child(version === null ? 'checking' : version || 'not installed'));
     };
-    return new Sidebar('nav').brand('Chat').brandMark(asset('message')).brandAction(this.renderToggle(cx))
+    const sidebar = new Sidebar('nav').brand('Chat').brandMark(asset('message')).brandAction(this.renderToggle(cx))
       .search(new SearchField('chat-search', this.search).icon(asset('search')).build(cx))
       .children(items)
       .footer(v_flex().gap(1).children(providerIds.map(status)))
       .build(cx);
+    return v_flex().size_full().min_h_0().pt(TRAFFIC_LIGHTS.top).child(sidebar);
   }
   renderHeader(conversation, cx) {
     const provider = PROVIDERS[this.provider];
@@ -654,7 +662,7 @@ export default class Chat extends View {
       .badge(new Badge(busy ? 'Replying' : 'Ready').tone(busy ? 'accent' : 'neutral').dot().build(cx))
       .actions(actions);
     if (count) header.meta(`${count} message${count === 1 ? '' : 's'}`);
-    if (!this.sidebar) header.leading(this.renderToggle(cx));
+    if (!this.sidebar) header.leading(div().pl(TRAFFIC_LIGHTS.left).child(this.renderToggle(cx)));
     return header.build(cx);
   }
   // The toggle sits in the sidebar while it is open and moves to the start of

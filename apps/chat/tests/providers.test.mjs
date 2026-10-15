@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession, describeActivity, continuePrompt } from '../lib/providers.js';
+import { shellCommand, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession, describeActivity, continuePrompt } from '../lib/providers.js';
 
 const feed = (provider, events) => {
   const turn = createTurn();
@@ -81,7 +81,25 @@ test('finish errors explain timeouts, exit codes and empty replies', () => {
   assert.equal(finishError(createTurn(), { code: 2 }, 'Reading additional input from stdin...\nnot logged in\n'), 'not logged in');
   assert.equal(finishError(createTurn(), { code: 0 }, ''), 'The reply was empty.');
   assert.equal(finishError(createTurn(), { code: null, error: 'running `codex` failed: executable was not found on the host PATH' }, ''),
-    'Couldn’t find `codex`. Install it and start gpui-shell from a shell that has it on PATH.');
+    'Couldn’t find `codex`. Install it, or add its folder to PATH in your shell profile.');
+  // Through the login shell, a missing tool is exit code 127 and the shell's own message.
+  assert.equal(finishError(createTurn(), { code: 127 }, 'zsh:1: command not found: claude'),
+    'Couldn’t find `claude`. Install it, or add its folder to PATH in your shell profile.');
+  assert.equal(finishError(createTurn(), { code: 127 }, 'codex: 1: exec: codex: not found'),
+    'Couldn’t find `codex`. Install it, or add its folder to PATH in your shell profile.');
+});
+
+test('tools start through the login shell with HOME set, except on Windows', () => {
+  const [program, args] = shellCommand('codex', ['exec', '--', 'a "b" $c'], { platform: 'macos', home: '/Users/me' });
+  assert.equal(program, '/usr/bin/env');
+  assert.deepEqual(args.slice(0, 3), ['HOME=/Users/me', '/bin/zsh', '-lc']);
+  assert.match(args[3], /\/opt\/homebrew\/bin/);
+  // The tool and its arguments stay separate argv entries, never shell text.
+  assert.deepEqual(args.slice(4), ['codex', 'exec', '--', 'a "b" $c']);
+  assert.equal(shellCommand('claude', [], { platform: 'darwin', home: '/Users/me' })[1][1], '/bin/zsh');
+  assert.equal(shellCommand('claude', [], { platform: 'linux', home: '/home/me' })[1][1], '/bin/sh');
+  assert.deepEqual(shellCommand('claude', ['-p'], { platform: 'windows', home: 'C:\\Users\\me' }), ['claude', ['-p']]);
+  assert.deepEqual(shellCommand('claude', ['-p'], { platform: 'win32', home: 'C:\\Users\\me' }), ['claude', ['-p']]);
 });
 
 test('context prompts carry recent history within a bound', () => {

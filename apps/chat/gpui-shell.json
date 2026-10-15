@@ -21,8 +21,7 @@
         "${dataDir}"
       ],
       "execute": [
-        "claude",
-        "codex",
+        "/usr/bin/env",
         "fc-match",
         "fc-list"
       ]

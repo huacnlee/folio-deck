@@ -11,7 +11,7 @@ A desktop chat client in the shape of ChatGPT and Claude Desktop, built entirely
 
 ## Run
 
-Install and sign in to at least one of the tools, then start gpui-shell from a shell where they are on `PATH`:
+Install and sign in to at least one of the tools. Chat starts them through your login shell (`zsh -l` on macOS, `sh -l` elsewhere), so it finds them as a terminal would, also when opened from Finder or a desktop launcher; `~/.local/bin`, Homebrew, `/usr/local/bin`, bun, npm and cargo folders are searched after your own `PATH`:
 
 ```sh
 claude --version && codex --version
@@ -44,7 +44,7 @@ gpui-shell dev apps/chat
 | Grant | Purpose |
 | --- | --- |
 | `fs.read` / `fs.write` `${dataDir}` | Save and load chats; `workspace/` inside it is the working directory the tools run in, so their sessions are filed under one project and resume reliably |
-| Execute `claude`, `codex` | Generate replies with your local sign-in, and read their versions |
+| Execute `/usr/bin/env` | Start `claude` and `codex` through your login shell, with HOME and USER set, to generate replies with your local sign-in and read their versions. gpui-shell gives a child process an empty environment and resolves commands on its own `PATH`, which for an app opened from Finder holds only the system folders |
 | Execute `fc-match`, `fc-list` | Resolve the system `monospace` family for data, and find a CJK sans family for words |
 | Storage | Remember the chosen provider, model, and the sidebar's state and width |
 | Clipboard write | Copy a reply |

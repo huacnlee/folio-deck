@@ -26,6 +26,35 @@ export const PROVIDERS = {
 
 export const providerIds = Object.keys(PROVIDERS);
 
+// gpui-shell names the platforms `macos` and `windows`; Node says `darwin` and `win32`.
+/** @param {string} platform */
+export const isMac = (platform) => platform === 'macos' || platform === 'darwin';
+/** @param {string} platform */
+export const isWindows = (platform) => platform === 'windows' || platform === 'win32';
+
+// Where the tools' installers put them, searched after the user's own PATH.
+const INSTALL_DIRS = '$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin';
+
+/**
+ * The program and arguments that start a tool. gpui-shell finds a bare command
+ * on its own PATH and gives the child an empty environment; opened from
+ * Finder or a desktop launcher, that PATH is only the system folders, and a
+ * Node-based CLI such as `codex` cannot find `node` without one. So the tool
+ * runs through the user's login shell, which supplies the PATH, HOME and keys
+ * a terminal would, plus USER. The command and its arguments stay separate argv entries.
+ * @param {string} command
+ * @param {string[]} args
+ * @param {{ platform: string, home: string }} host
+ * @returns {[string, string[]]}
+ */
+export function shellCommand(command, args, { platform, home }) {
+  if (isWindows(platform)) return [command, args];
+  const shell = isMac(platform) ? '/bin/zsh' : '/bin/sh';
+  // Claude Code finds its Keychain sign-in on macOS only when USER is set.
+  const script = `USER="\${USER:-$(id -un)}"; PATH="\${PATH:+$PATH:}${INSTALL_DIRS}"; export USER PATH; exec "$0" "$@"`;
+  return ['/usr/bin/env', [`HOME=${home}`, shell, '-lc', script, command, ...args]];
+}
+
 /**
  * Command-line arguments for one turn. Tools are off for Claude and Codex
  * runs read-only on every turn, resumed or new, so a chat never edits files. The prompt follows `--` so a
@@ -205,10 +234,14 @@ export function finishError(turn, exit, stderr) {
     if (/timed out/.test(exit.error)) return 'The reply took longer than gpui-shell allows a command to run (30 seconds). Try a shorter question, or retry.';
     if (/not found on the host PATH|PATH environment variable is not set/.test(exit.error)) {
       const command = /`([^`]+)`/.exec(exit.error)?.[1] ?? 'the command';
-      return `Couldn’t find \`${command}\`. Install it and start gpui-shell from a shell that has it on PATH.`;
+      return missingCommand(command);
     }
     return exit.error;
   }
+  // The login shell reports a tool it cannot find with exit code 127.
+  // zsh says "command not found: claude"; sh says "exec: claude: not found".
+  const missing = exit.code === 127 && (/command not found: (\S+)/.exec(stderr) ?? /exec: (\S+): not found/.exec(stderr));
+  if (missing) return missingCommand(missing[1]);
   if (exit.code !== 0 && exit.code !== null) {
     const detail = stderr.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('Reading additional input')).pop();
     return detail || `The command exited with code ${exit.code}.`;
@@ -216,6 +249,10 @@ export function finishError(turn, exit, stderr) {
   if (!turn.text) return 'The reply was empty.';
   return null;
 }
+
+/** @param {string} command */
+const missingCommand = (command) =>
+  `Couldn’t find \`${command}\`. Install it, or add its folder to PATH in your shell profile.`;
 
 /**
  * A prompt carrying earlier messages, for a conversation that has no session
