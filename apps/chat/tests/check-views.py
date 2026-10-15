@@ -5,6 +5,7 @@ Each state runs in a scratch copy whose start-up I/O is disabled: no saved
 chats are read, nothing is written, and neither `claude` nor `codex` runs.
 """
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -44,6 +45,11 @@ states = {
     'model-menu': "this.menu = { kind: 'model' };",
     'banner-undo': "this.deleted = { conversation: this.conversations[1], index: 1 }; this.message = { text: 'Deleted “Old question”.', undo: true };",
     'no-sidebar': "this.sidebar = false;",
+    # Needs a runtime with WebView (newer than 0.7.3) and an X11 window; elsewhere the state matches 'transcript'.
+    'link-pane': "try { if (WebViewState) this.browser = { page: WebViewState.new('https://example.com/'), url: 'https://example.com/', title: 'Example Domain', loading: false, open: true }; } catch (error) { console.error(String(error)); }",
+    'link-full': "try { if (WebViewState) { this.browser = { page: WebViewState.new('https://example.com/'), url: 'https://example.com/', title: 'Example Domain', loading: false, open: true }; this.linkFull = true; } } catch (error) { console.error(String(error)); }",
+    'link-resized': "try { if (WebViewState) { this.browser = { page: WebViewState.new('https://example.com/'), url: 'https://example.com/', title: '', loading: true, open: true }; this.linkWidth = 5000; } } catch (error) { console.error(String(error)); }",
+    'link-closed': "try { if (WebViewState) this.browser = { page: WebViewState.new('https://example.com/'), url: 'https://example.com/', title: '', loading: false, open: false }; } catch (error) { console.error(String(error)); }",
 }
 with tempfile.TemporaryDirectory(prefix='chat-views-', dir=cache) as scratch:
     for name, state in states.items():
@@ -55,5 +61,5 @@ with tempfile.TemporaryDirectory(prefix='chat-views-', dir=cache) as scratch:
         manifest['id'] = 'com.huacnlee.chat.check-' + name
         manifest['capabilities'] = {'fs': {'read': ['${pluginDir}'], 'write': ['${dataDir}']}}
         (target / 'gpui-shell.json').write_text(json.dumps(manifest))
-        subprocess.run(['gpui-shell', 'check', '-d', str(target)], check=True)
+        subprocess.run([os.environ.get('GPUI_SHELL', 'gpui-shell'), 'check', '-d', str(target)], check=True)
         print('materialized:', name)

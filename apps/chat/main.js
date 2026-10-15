@@ -1,6 +1,7 @@
 // @ts-check
 import { View, div, svg } from 'gpui-kit';
 import { h_flex, v_flex, Input, InputState, Textarea, TextareaState, TextView, Popup } from 'gpui-base';
+import * as components from 'gpui-component';
 import { MessageScroller, MessageScrollerState, ShimmerText } from 'gpui-component';
 import * as fs from 'fs/promises';
 import { randomUUID } from 'crypto';
@@ -9,6 +10,7 @@ import {
   PageHeader, Pulse, ScanLine, SearchField, Segmented, SelectTrigger, Sidebar, Steps, Tag, applyTheme, theme,
 } from 'zion-ui';
 import { PROVIDERS, providerIds, buildArgs, createTurn, applyLine, finishError, contextPrompt, parseVersion, codexSession, describeActivity, continuePrompt } from './lib/providers.js';
+import { extractLinks, isWebUrl } from './lib/links.js';
 import { newConversation, titleFrom, displayTitle, groupByDate, filterConversations, serialize, parseStore, formatDuration, formatCost, markInterrupted } from './lib/store.js';
 
 const PREFS = 'chat.preferences.v1';
@@ -23,8 +25,14 @@ const asset = (name) => `chat/icons/${name}.svg`;
 const icon = (name, size = 14) => svg(asset(name)).size(size).flex_shrink_0();
 const reason = (error) => String(error?.message ?? error).replace(/^Error:\s*/, '');
 const TICK_MS = 450;
+const MAX_LINKS = 6;
+const LINK_MIN = 280;
+const ZOOMS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 // Timestamps a turn's last output, and the moment its stage changed.
 const stamp = (turn, before) => { const now = Date.now(); turn.eventAt = now; if (turn.stage !== before) turn.stageAt = now; };
+// `WebView` arrived after gpui-shell 0.7.3; without it a link opens in the
+// system browser.
+const { WebView, WebViewState } = /** @type {any} */ (components);
 function loadPrefs() { try { return JSON.parse(localStorage.getItem(PREFS) ?? '{}'); } catch { return {}; } }
 function savePrefs(value) { try { localStorage.setItem(PREFS, JSON.stringify(value)); } catch {} }
 
@@ -54,6 +62,13 @@ export default class Chat extends View {
     this.saveVersion = 0;
     this.notifyQueued = false;
     this.scroller = MessageScrollerState.new(0);
+    // The link pane: one retained page, its address and title, and whether
+    // the pane is open. A closed pane keeps its page for the next link.
+    this.browser = null;
+    this.linkWidth = Number.isFinite(prefs.linkWidth) ? prefs.linkWidth : null;
+    this.linkFull = false;
+    this.linkDrag = null;
+    this.linkZoom = ZOOMS.includes(prefs.linkZoom) ? prefs.linkZoom : 1;
     this.dataFile = process.dataDir ? `${process.dataDir}/conversations.json` : null;
     this.workdir = process.dataDir ? `${process.dataDir}/workspace` : null;
     this.composer = TextareaState.new({ placeholder: 'Ask anything…', rows: 1 });
@@ -131,7 +146,7 @@ export default class Chat extends View {
       catch (error) { this.message = { error: true, text: `Couldn’t save chats: ${reason(error)}` }; cx.notify(); }
     });
   }
-  persistPrefs() { savePrefs({ provider: this.provider, model: this.model, sidebar: this.sidebar, sidebarWidth: this.sidebarWidth, current: this.currentId }); }
+  persistPrefs() { savePrefs({ provider: this.provider, model: this.model, sidebar: this.sidebar, sidebarWidth: this.sidebarWidth, linkWidth: this.linkWidth, linkZoom: this.linkZoom, current: this.currentId }); }
 
   // ---- conversations -----------------------------------------------------
 
@@ -476,26 +491,117 @@ export default class Chat extends View {
     if (ctrl && key === 'n') { this.newChat(cx); cx.stop_propagation(); }
     else if (ctrl && key === 'b') { this.sidebar = !this.sidebar; this.persistPrefs(); cx.notify(); cx.stop_propagation(); }
     else if (key === 'escape' && this.running) this.stop(cx);
+    else if (key === 'escape' && this.browser?.open) this.closeLink(cx);
+  }
+  // ---- links -------------------------------------------------------------
+
+  // A link in a reply, or from the bar under the transcript, opens beside the
+  // chat in one pane whose page later links reuse. It goes to the system
+  // browser when the runtime has no WebView or cannot create one (a Wayland
+  // window on Linux).
+  openLink(url, cx) {
+    if (!isWebUrl(url)) return;
+    try {
+      if (this.browser) this.browser.page.load_url(url);
+      else if (WebViewState) { this.browser = { page: WebViewState.new(url) }; this.applyZoom(); }
+      if (this.browser) { Object.assign(this.browser, { url, title: '', loading: true, open: true }); cx.notify(); return; }
+    } catch (error) {
+      this.message = { error: false, text: `Opened the link in your browser — ${reason(error)}` };
+    }
+    try { cx.open_url(url); } catch (error) { this.message = { error: true, text: `Couldn’t open ${url}: ${reason(error)}` }; }
+    cx.notify();
+  }
+  closeLink(cx) {
+    if (this.browser) this.browser.open = false;
+    this.linkFull = false;
+    this.focus.focus();
+    cx.notify();
+  }
+  linkLoaded(url, cx) {
+    if (!this.browser) return;
+    // The page navigates on its own too, so the address follows the document.
+    this.browser.url = url;
+    this.browser.loading = false;
+    try { this.browser.page.evaluate_script('window.ipc.postMessage(document.title)'); } catch {}
+    cx.notify();
+  }
+  // The engine's own zoom, which it keeps across navigations.
+  applyZoom() {
+    try { this.browser?.page.set_zoom(this.linkZoom); } catch (error) { console.error(reason(error)); }
+  }
+  zoomLink(step, cx) {
+    const index = ZOOMS.indexOf(this.linkZoom);
+    this.linkZoom = step === 0 ? 1 : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, index + step))];
+    this.applyZoom();
+    this.persistPrefs();
+    cx.notify();
+  }
+  // How wide the link pane is: the width it was dragged to, or under half of
+  // what the sidebar leaves, and never so wide that the chat column drops
+  // below 360 pixels.
+  linkPaneWidth() {
+    return this.clampLinkWidth(this.linkWidth ?? Math.min(760, this.linkAvailable() * 0.46));
+  }
+  clampLinkWidth(width) {
+    return Math.round(Math.max(LINK_MIN, Math.min(width, this.linkAvailable() - 360)));
+  }
+  linkAvailable() {
+    let width = 1180;
+    try { width = window.viewport_size().width; } catch {}
+    return width - (this.sidebar ? this.sidebarWidth : 0);
+  }
+  // Dragging the pane's left edge, leftwards to widen it. The native page
+  // would take the pointer as the edge moves over it, and relay out on every
+  // move, so while the drag lasts the pane shows a placeholder instead.
+  dragLink(event, cx) {
+    const drag = this.linkDrag;
+    if (!drag) return;
+    const next = this.clampLinkWidth(drag.width - (event.position.x - drag.x));
+    if (next !== drag.next) { drag.next = next; cx.notify(); }
+  }
+  endLinkDrag(cx) {
+    const drag = this.linkDrag;
+    if (!drag) return;
+    this.linkDrag = null;
+    this.linkWidth = drag.next;
+    this.persistPrefs();
+    cx.notify();
   }
   // ---- rendering ---------------------------------------------------------
 
   render(cx) {
     const conversation = this.current();
-    const main = v_flex().size_full().min_h_0()
+    const full = Boolean(this.browser?.open && this.linkFull);
+    const main = full ? null : v_flex().size_full().min_h_0()
       .child(this.renderHeader(conversation, cx))
       .when(Boolean(this.message), (el) => el.child(this.renderBanner(cx)))
       .child(conversation && conversation.messages.length ? this.renderTranscript(conversation, cx) : this.renderWelcome(cx))
       .when(Boolean(conversation?.messages.length), (el) => { const actions = this.renderReplyActions(conversation, cx); return actions ? el.child(actions) : el; })
       .child(this.renderComposer(cx));
+    // Full, the pane takes the whole chat area; the chat keeps its state and
+    // comes back as it was.
+    const content = !this.browser?.open ? main
+      : full ? this.renderLinkPane(cx)
+      : h_flex().size_full().min_h_0()
+        .on_mouse_move((event, cx) => this.dragLink(event, cx))
+        .on_mouse_up('left', (_event, cx) => this.endLinkDrag(cx))
+        .child(div().flex_1().min_w_0().h_full().child(main))
+        .child(div().id('link-resize').w(6).h_full().flex_shrink_0().cursor_col_resize()
+          .on_mouse_down('left', (event, cx) => { const width = this.linkPaneWidth(); this.linkDrag = { x: event.position.x, width, next: width }; cx.stop_propagation(); cx.notify(); })
+          .child(div().mx(2).w(2).h_full().rounded(1).bg(this.linkDrag ? theme().colors.borderStrong : theme().colors.clear).hover((style) => style.bg(theme().colors.border))))
+        .child(this.renderLinkPane(cx));
     // Overlays — dialogs, menus — sit beside the frame, not inside it, so the
     // root carries the font for them to inherit.
     const sans = theme().fonts.sans;
     return div().id('chat').track_focus(this.focus).key_context('Chat').relative().size_full()
       .when(Boolean(sans), (el) => el.font_family(sans))
       .on_key_down((event, cx) => this.key(event, cx))
-      .child(new AppFrame('chat-frame').sidebar(this.renderSidebar(cx)).main(main).collapsed(!this.sidebar).sidebarWidth(this.sidebarWidth)
+      .child(new AppFrame('chat-frame').sidebar(this.renderSidebar(cx)).main(content).collapsed(!this.sidebar).sidebarWidth(this.sidebarWidth)
         .resizable({ min: 200, max: 380, onResize: (width, cx) => { this.sidebarWidth = width; this.persistPrefs(); cx.notify(); } })
         .build(cx))
+      // A native page that stops being drawn stays on screen, so a closed
+      // pane's page is drawn at no size, which hides it.
+      .when(Boolean(this.browser && !this.browser.open), (el) => el.child(div().absolute().w(0).h(0).overflow_hidden().child(WebView.new(this.browser.page).w(0).h(0))))
       .when(Boolean(this.dialog), (el) => el.child(this.renderDialog(cx)))
       .when(Boolean(this.menu && this.menu.kind !== 'model'), (el) => el.child(this.renderMenu(cx)))
       .when(this.menu?.kind === 'model', (el) => el.child(this.renderBackdrop(cx)));
@@ -592,8 +698,8 @@ export default class Chat extends View {
       return message ? this.renderMessage(conversation, message) : null;
     }).scrollbar(true).jump_button(false).flex_1().min_h_0().w_full();
   }
-  // Transcript rows are laid out by the list, so they hold no handlers and no
-  // retained components; they paint with the theme's colors directly.
+  // Transcript rows are laid out by the list, so they hold no retained
+  // components and paint with the theme's colors directly.
   renderMessage(conversation, message) {
     const t = theme(), c = t.colors;
     const column = (child) => h_flex().w_full().justify_center().py(10).child(v_flex().w_full().max_w(760).px(24).child(child));
@@ -615,28 +721,37 @@ export default class Chat extends View {
       .when(Boolean(waiting), (el) => el.child(v_flex().gap(4)
         .child(ShimmerText.new(`${this.activityOf(run, Date.now()).label}…`).id(`shimmer-${message.id}`).text_size(t.type.body))
         .when(Boolean(run?.turn.thinking), (el) => el.child(div().text_size(t.type.small).text_color(c.tertiary).whitespace_normal().child(run.turn.thinking.slice(-600))))))
-      .when(Boolean(message.text), (el) => el.child(TextView.markdown(`reply-${message.id}`, message.text).selectable(true).w_full().text_size(t.type.body + 1)))
+      .when(Boolean(message.text), (el) => el.child(TextView.markdown(`reply-${message.id}`, message.text).selectable(true).w_full().text_size(t.type.body + 1)
+        // A runtime with WebView also lets transcript rows hold handlers; on
+        // 0.7.3 the row would refuse this, and links go to the system browser.
+        .when(Boolean(WebViewState), (el) => el.on_link_click((url, cx) => this.openLink(url, cx)))))
       .when(Boolean(message.error), (el) => el.child(div().text_size(t.type.body).text_color(t.tone('danger').fg).whitespace_normal().child(message.error))));
   }
   // Transcript rows cannot hold buttons, so the latest reply's actions sit
-  // just under the transcript, on the same column as the messages' text.
+  // just under the transcript, on the same column as the messages' text,
+  // with its web links, which open in the link pane.
   renderReplyActions(conversation, cx) {
     const last = conversation.messages[conversation.messages.length - 1];
     if (this.running || last?.role !== 'assistant') return null;
     const copied = this.copied === last.id;
+    const links = extractLinks(last.text).slice(0, MAX_LINKS);
     return h_flex().w_full().flex_shrink_0().justify_center()
       .child(h_flex().w_full().max_w(760).px(18).gap(2).items_center()
         .when(Boolean(last.text), (el) => el.child(new IconButton('copy-reply').icon(asset(copied ? 'check' : 'copy')).size('sm').description(copied ? 'Copied' : 'Copy reply').onClick((_e, cx) => this.copy(last, cx)).build(cx)))
         .child(new IconButton('retry-reply').icon(asset('refresh')).size('sm').description('Retry').onClick((_e, cx) => this.retry(cx)).build(cx))
         .when(Boolean(last.interrupted && last.text), (el) => el.child(new Button('continue-reply').label('Continue').icon(asset('send')).variant('secondary').size('sm')
-          .tooltip('Finish this reply from where it stopped').onClick((_e, cx) => this.continueReply(cx)).build(cx))));
+          .tooltip('Finish this reply from where it stopped').onClick((_e, cx) => this.continueReply(cx)).build(cx)))
+        .when(links.length > 0, (el) => el.child(h_flex().flex_1().min_w_0().ml(6).gap(6).items_center().overflow_hidden()
+          .child(div().flex_shrink_0().text_color(theme().colors.tertiary).child(icon('globe', 13)))
+          .children(links.map((link, index) => new Chip(`reply-link-${index}`).label(link.label.length > 36 ? `${link.label.slice(0, 35)}…` : link.label).sans()
+            .selected(Boolean(this.browser?.open) && this.browser.url === link.url).onClick((_e, cx) => this.openLink(link.url, cx)).build(cx))))));
   }
   renderComposer(cx) {
     const t = theme(), c = t.colors, provider = PROVIDERS[this.provider], running = Boolean(this.running);
     const empty = !this.composer.value().trim();
     const model = provider.models.find((item) => item.id === this.model) ?? provider.models[0];
     let wide = true, mainWidth = 800;
-    try { mainWidth = window.viewport_size().width - (this.sidebar ? this.sidebarWidth : 0); wide = mainWidth >= 640; } catch {}
+    try { mainWidth = window.viewport_size().width - (this.sidebar ? this.sidebarWidth : 0) - (this.browser?.open ? this.linkPaneWidth() + 6 : 0); wide = mainWidth >= 640; } catch {}
     // The scan line moves in pixels: the composer column, less its border
     // and the inset that keeps the bar off the rounded corners.
     const scanWidth = Math.max(40, Math.min(760, mainWidth - 48) - 2 - 2 * t.radius.card);
@@ -665,6 +780,40 @@ export default class Chat extends View {
               : new Button('send').label('Send').icon(asset('send')).variant('primary').size('sm').disabled(empty || !this.loaded).onClick((_e, cx) => this.send(cx)).build(cx))))
         .child(div().w_full().text_center().text_size(t.type.caption).text_color(c.tertiary)
           .child(`${provider.label} can make mistakes. Chats are saved on this computer.`)));
+  }
+  // The page a reply linked to, with its own history, beside the transcript.
+  renderLinkPane(cx) {
+    const t = theme(), c = t.colors, browser = this.browser;
+    const nav = (id, name, description, action) => new IconButton(id).icon(asset(name)).size('sm').description(description)
+      .onClick((_e, cx) => { try { action(cx); } catch (error) { console.error(reason(error)); } cx.notify(); }).build(cx);
+    let host = browser.url;
+    try { host = new URL(browser.url).host; } catch {}
+    return v_flex().h_full().min_h_0().bg(c.main)
+      .map((el) => this.linkFull ? el.flex_1().w_full() : el.flex_shrink_0().w(this.linkDrag?.next ?? this.linkPaneWidth()).border_l(1).border_color(c.border))
+      .child(h_flex().flex_shrink_0().h(44).px(8).gap(2).items_center().border_b(1).border_color(c.border)
+        .child(nav('link-back', 'chevron-left', 'Back', () => browser.page.back()))
+        .child(nav('link-forward', 'chevron-right', 'Forward', () => browser.page.forward()))
+        .child(nav('link-reload', 'refresh', 'Reload', () => { browser.loading = true; browser.page.reload(); }))
+        .child(h_flex().flex_1().min_w_0().px(6).gap(6).items_center()
+          .child(div().text_color(browser.loading ? c.accent : c.tertiary).child(icon('globe', 13)))
+          .child(v_flex().flex_1().min_w_0()
+            .child(div().truncate().text_size(t.type.body).text_color(c.bright).child(browser.title || host))
+            .child(div().truncate().text_size(t.type.small).font_family(t.fonts.mono).text_color(c.tertiary).child(browser.url))))
+        .child(nav('link-zoom-out', 'zoom-out', 'Zoom out', (cx) => this.zoomLink(-1, cx)))
+        .child(new Button('link-zoom-reset').label(`${Math.round(this.linkZoom * 100)}%`).variant('ghost').size('sm').tooltip('Actual size').onClick((_e, cx) => this.zoomLink(0, cx)).build(cx))
+        .child(nav('link-zoom-in', 'zoom-in', 'Zoom in', (cx) => this.zoomLink(1, cx)))
+        .child(nav('link-full', this.linkFull ? 'minimize' : 'maximize', this.linkFull ? 'Restore (show the chat)' : 'Maximize (fill the chat area)', () => { this.linkFull = !this.linkFull; }))
+        .child(nav('link-external', 'external', 'Open in browser', (cx) => cx.open_url(browser.page.url() || browser.url)))
+        .child(nav('link-close', 'close', 'Close (Esc)', (cx) => this.closeLink(cx))))
+      .child(this.linkDrag
+        // Drawn at no size, the page is hidden until the drag ends.
+        ? v_flex().flex_1().min_h_0().w_full().items_center().justify_center().gap(8).text_color(c.tertiary)
+          .child(icon('globe', 28))
+          .child(div().text_size(t.type.body).child(`${this.linkDrag.next} px`))
+          .child(div().absolute().w(0).h(0).overflow_hidden().child(WebView.new(browser.page).w(0).h(0)))
+        : WebView.new(browser.page).flex_1().min_h_0().w_full()
+          .on_load((url, cx) => this.linkLoaded(url, cx))
+          .on_message((title, cx) => { if (this.browser) { this.browser.title = String(title).trim(); cx.notify(); } }));
   }
   // What the turn is doing, just above the composer: a pulse that keeps
   // moving, the phase, and a running clock, so a long wait never looks stuck.
