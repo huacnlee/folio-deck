@@ -5,6 +5,8 @@ inbox, a customer table, a notification panel and a ticket detail panel —
 written in JavaScript and rendered natively by GPUI. No DOM, no browser. All
 people, companies and tickets are made up.
 
+<img width="1487" height="935" alt="image" src="https://github.com/user-attachments/assets/296304cd-c0d8-464b-8ceb-36d8bf2630dd" />
+
 ## What it does
 
 - **Tickets** — summary tiles with week-over-week change, a four-column
